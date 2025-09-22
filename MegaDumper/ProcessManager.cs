@@ -220,15 +220,35 @@ namespace Mega_Dumper
         private static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress,
            uint dwSize, AllocationType flAllocationType, MemoryProtection flProtect);
 
-        [DllImport("Kernel32.dll")]
-        public static extern bool ReadProcessMemory
-        (
-         IntPtr hProcess,
-         IntPtr lpBaseAddress,
-         byte[] lpBuffer,
-         uint nSize,
-         ref uint lpNumberOfBytesRead
-         );
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "ReadProcessMemory")]
+        public static extern bool ReadProcessMemory(
+            IntPtr hProcess,
+            IntPtr lpBaseAddress,
+            [Out] byte[] lpBuffer,
+            UIntPtr nSize,
+            out UIntPtr lpNumberOfBytesRead
+        );
+
+        // Back-compat wrapper that preserves your original signature (uint size + ref uint bytesRead)
+        public static bool ReadProcessMemory(
+            IntPtr hProcess,
+            IntPtr lpBaseAddress,
+            byte[] lpBuffer,
+            uint nSize,
+            ref uint lpNumberOfBytesRead
+        )
+        {
+            bool ok = ReadProcessMemory(
+                hProcess,
+                lpBaseAddress,
+                lpBuffer,
+                (UIntPtr)nSize,
+                out UIntPtr bytesRead
+            );
+
+            lpNumberOfBytesRead = (uint)bytesRead; // safe for reads < uint.MaxValue
+            return ok;
+        }
 
         [Flags]
         public enum AllocationType

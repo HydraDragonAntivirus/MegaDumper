@@ -128,15 +128,37 @@ namespace MegaDumper
 uint lpAddress, out MemoryBasicInformation lpBuffer,
 uint dwLength);
 
-        [DllImport("Kernel32.dll")]
-        public static extern bool ReadProcessMemory
-        (
+        // Modern extern (x86/x64). Keeps the same name.
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "ReadProcessMemory")]
+        public static extern bool ReadProcessMemory(
+            IntPtr hProcess,
+            IntPtr lpBaseAddress,
+            [Out] byte[] lpBuffer,
+            UIntPtr nSize,
+            out UIntPtr lpNumberOfBytesRead
+        );
+
+        // Compatibility wrapper: preserves the old signature you had (uint size + ref uint bytesRead)
+        // and forwards to the modern extern above.
+        public static bool ReadProcessMemory(
             IntPtr hProcess,
             IntPtr lpBaseAddress,
             byte[] lpBuffer,
             uint nSize,
             ref uint lpNumberOfBytesRead
-        );
+        )
+        {
+            bool ok = ReadProcessMemory(
+                hProcess,
+                lpBaseAddress,
+                lpBuffer,
+                (UIntPtr)nSize,
+                out UIntPtr bytesRead
+            );
+
+            lpNumberOfBytesRead = (uint)bytesRead; // safe for typical reads < uint.MaxValue
+            return ok;
+        }
 
         private void DetectAntidumpsShown(object sender, EventArgs e)
         {

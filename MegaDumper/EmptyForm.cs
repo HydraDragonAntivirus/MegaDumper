@@ -3,22 +3,21 @@
  * User: Bogdan
  * Date: 27.10.2010
  * Time: 18:14
- * 
- * To change this template use Tools | Options | Coding | Edit Standard Headers.
+ * * To change this template use Tools | Options | Coding | Edit Standard Headers.
  */
 using ProcessUtils;
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace Mega_Dumper
 {
     /// <summary>
-    /// Description of Form3.
+    /// Description of EmptyForm.
     /// </summary>
-    ///
     public partial class EmptyForm : Form
     {
         public string ProcessName;
@@ -44,76 +43,89 @@ namespace Mega_Dumper
         {
             textBox1.Text = "";
             if (whattodo == 1)
-                Text = "Hook detection for " + ProcessName + " whit PID=" + procid.ToString();
+                Text = "Hook detection for " + ProcessName + " with PID=" + procid.ToString();
             else if (whattodo == 2)
-                Text = "Environment Variables for " + ProcessName + " whit PID=" + procid.ToString();
+                Text = "Environment Variables for " + ProcessName + " with PID=" + procid.ToString();
             else if (whattodo == 3)
-                Text = "Files/directories from " + ProcessName + " whit PID=" + procid.ToString();
+                Text = "Files/directories from " + ProcessName + " with PID=" + procid.ToString();
             else if (whattodo == 4)
                 Text = "Code section differences: process name " + ProcessName + "; PID=" + procid.ToString();
         }
 
-        [DllImport("Kernel32.dll")]
-        public static extern bool ReadProcessMemory
-        (
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool ReadProcessMemory(
+            IntPtr hProcess,
+            IntPtr lpBaseAddress,
+            [Out] byte[] lpBuffer,
+            UIntPtr nSize,
+            out UIntPtr lpNumberOfBytesRead
+        );
+
+        public static bool ReadProcessMemory(
             IntPtr hProcess,
             IntPtr lpBaseAddress,
             byte[] lpBuffer,
             uint nSize,
-            ref uint lpNumberOfBytesRead
-        );
+            out uint lpNumberOfBytesRead
+        )
+        {
+            bool ok = ReadProcessMemory(
+                hProcess,
+                lpBaseAddress,
+                lpBuffer,
+                (UIntPtr)nSize,
+                out UIntPtr bytesRead
+            );
+
+            lpNumberOfBytesRead = (uint)bytesRead;
+            return ok;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true, CallingConvention = CallingConvention.Winapi)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsWow64Process([In] IntPtr processHandle, [Out, MarshalAs(UnmanagedType.Bool)] out bool wow64Process);
+
+        private static bool Is64BitProcess(IntPtr processHandle)
+        {
+            if (!Environment.Is64BitOperatingSystem)
+                return false;
+
+            if (!IsWow64Process(processHandle, out bool isWow64))
+                return false; // Could not determine
+
+            return !isWow64;
+        }
 
         public enum ProcessAccess
         {
-            /// <summary>Enables usage of the process handle in the TerminateProcess function to terminate the process.</summary>
             Terminate = 0x1,
-            /// <summary>Enables usage of the process handle in the CreateRemoteThread function to create a thread in the process.</summary>
             CreateThread = 0x2,
-            /// <summary>Enables usage of the process handle in the VirtualProtectEx and WriteProcessMemory functions to modify the virtual memory of the process.</summary>
             VMOperation = 0x8,
-            /// <summary>Enables usage of the process handle in the ReadProcessMemory function to' read from the virtual memory of the process.</summary>
             VMRead = 0x10,
-            /// <summary>Enables usage of the process handle in the WriteProcessMemory function to write to the virtual memory of the process.</summary>
             VMWrite = 0x20,
-            /// <summary>Enables usage of the process handle as either the source or target process in the DuplicateHandle function to duplicate a handle.</summary>
             DuplicateHandle = 0x40,
-            /// <summary>Enables usage of the process handle in the SetPriorityClass function to set the priority class of the process.</summary>
             SetInformation = 0x200,
-            /// <summary>Enables usage of the process handle in the GetExitCodeProcess and GetPriorityClass functions to read information from the process object.</summary>
             QueryInformation = 0x400,
-            /// <summary>Enables usage of the process handle in any of the wait functions to wait for the process to terminate.</summary>
             Synchronize = 0x100000,
-            /// <summary>Specifies all possible access flags for the process object.</summary>
             AllAccess = CreateThread | DuplicateHandle | QueryInformation | SetInformation | Terminate | VMOperation | VMRead | VMWrite | Synchronize
         }
 
-        private const uint PROCESS_TERMINATE = 0x0001;
-        private const uint PROCESS_CREATE_THREAD = 0x0002;
-        private const uint PROCESS_SET_SESSIONID = 0x0004;
-        private const uint PROCESS_VM_OPERATION = 0x0008;
         private const uint PROCESS_VM_READ = 0x0010;
-        private const uint PROCESS_VM_WRITE = 0x0020;
-        private const uint PROCESS_DUP_HANDLE = 0x0040;
-        private const uint PROCESS_CREATE_PROCESS = 0x0080;
-        private const uint PROCESS_SET_QUOTA = 0x0100;
-        private const uint PROCESS_SET_INFORMATION = 0x0200;
         private const uint PROCESS_QUERY_INFORMATION = 0x0400;
 
-        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        [StructLayout(LayoutKind.Sequential)]
         private struct PROCESS_BASIC_INFORMATION
         {
-            public int ExitStatus;
-            public int PebBaseAddress;
-            public int AffinityMask;
-            public int BasePriority;
-            public int UniqueProcessId;
-            public int InheritedFromUniqueProcessId;
-
-            public int Size => 6 * 4;
+            public IntPtr ExitStatus;
+            public IntPtr PebBaseAddress;
+            public IntPtr AffinityMask;
+            public IntPtr BasePriority;
+            public IntPtr UniqueProcessId;
+            public IntPtr InheritedFromUniqueProcessId;
         }
 
         [DllImport("kernel32.dll")]
-        private static extern IntPtr OpenProcess(uint dwDesiredAccess, int bInheritHandle, uint dwProcessId);
+        private static extern IntPtr OpenProcess(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwProcessId);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -124,48 +136,30 @@ namespace Mega_Dumper
            int processInformationClass, ref PROCESS_BASIC_INFORMATION processInformation, uint processInformationLength,
            out int returnLength);
 
-        /*
-         [DllImport("Kernel32.dll")]
-             public static extern bool ReadProcessMemory
-             (
-                 IntPtr hProcess,
-                 IntPtr lpBaseAddress,
-                 byte[] lpBuffer,
-                 UInt32 nSize,
-                 ref UInt32 lpNumberOfBytesRead
-             );
-        */
-
-        [DllImport("kernel32.dll")]
-        private static extern IntPtr OpenProcess(ProcessAccess dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwProcessId);
-
-        private void HoockDetect()
+        private string HoockDetect()
         {
-            textBox1.Text = "Detecting hooks for process whit the name " + ProcessName + " and PID=" + procid.ToString() + "\r\n";
+            var sb = new StringBuilder();
+            sb.AppendLine("Detecting hooks for process with the name " + ProcessName + " and PID=" + procid.ToString());
 
-            byte[] Forread = new byte[0x500];
-            uint BytesRead = 0;
-            IntPtr processHandle = IntPtr.Zero;
+            IntPtr processHandle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, (uint)procid);
+            if (processHandle == IntPtr.Zero)
+            {
+                sb.AppendLine("Failed to open selected process!");
+                return sb.ToString();
+            }
 
             try
-            {
-                processHandle = OpenProcess(ProcessAccess.QueryInformation | ProcessAccess.VMRead, false, (uint)procid);
-            }
-            catch
-            {
-            }
-            if (processHandle != IntPtr.Zero)
             {
                 ProcModule.ModuleInfo targetmscorjit = null;
                 ProcModule.ModuleInfo[] modules = ProcModule.GetModuleInfos(procid);
 
                 if (modules?.Length > 0)
                 {
-                    for (int i = 0; i < modules.Length; i++)
+                    foreach (var module in modules)
                     {
-                        if (modules[i].baseName.IndexOf("mscorjit", StringComparison.OrdinalIgnoreCase) >= 0)
+                        if (module.baseName.IndexOf("mscorjit", StringComparison.OrdinalIgnoreCase) >= 0)
                         {
-                            targetmscorjit = modules[i];
+                            targetmscorjit = module;
                             break;
                         }
                     }
@@ -173,237 +167,198 @@ namespace Mega_Dumper
 
                 if (targetmscorjit == null)
                 {
-                    textBox1.Text += "Seems that the target process is not a .NET process!\r\n";
+                    sb.AppendLine("Seems that the target process is not a .NET process!");
                 }
                 else
                 {
                     int getJitrva = ExportTable.ProcGetExpAddress(processHandle, targetmscorjit.baseOfDll, "getJit");
+                    byte[] Forread = new byte[0x500];
                     bool isok = ReadProcessMemory(processHandle,
-                    (IntPtr)((long)targetmscorjit.baseOfDll + getJitrva), Forread, (uint)Forread.Length, ref BytesRead);
+                        new IntPtr(targetmscorjit.baseOfDll.ToInt64() + getJitrva), Forread, (uint)Forread.Length, out uint BytesRead);
+
                     if (isok)
                     {
                         int count = 0;
-                        while (Forread[count] != 0x0C3)
+                        while (count < Forread.Length && Forread[count] != 0xC3) // RET instruction
                         {
                             count++;
                         }
 
-                        long cmpointer = (long)targetmscorjit.baseOfDll + getJitrva + count + 1;
-                        textBox1.Text = textBox1.Text + "Pointer of compile method : " + cmpointer.ToString("X8") + "\r\n";
-
-                        int CompileAddress = BitConverter.ToInt32(Forread, count + 1);
-                        textBox1.Text = textBox1.Text + "Address of compile method is : " + CompileAddress.ToString("X8") + "\r\n";
-
-                        if ((CompileAddress < (int)targetmscorjit.baseOfDll) || (CompileAddress > (int)targetmscorjit.baseOfDll + targetmscorjit.sizeOfImage))
+                        if (count >= Forread.Length)
                         {
-                            textBox1.Text += "Address of compile method changed!!!\r\n";
+                            sb.AppendLine("Could not find end of getJit function stub.");
+                            return sb.ToString();
+                        }
+
+                        long cmpointer = targetmscorjit.baseOfDll.ToInt64() + getJitrva + count + 1;
+                        sb.AppendLine("Pointer to compile method: " + cmpointer.ToString("X"));
+
+                        bool isTarget64Bit = Is64BitProcess(processHandle);
+                        long CompileAddress;
+
+                        if (isTarget64Bit)
+                        {
+                            CompileAddress = BitConverter.ToInt64(Forread, count + 1);
                         }
                         else
                         {
-                            textBox1.Text += "Address of compile method seems to be the original one!\r\n";
+                            CompileAddress = BitConverter.ToInt32(Forread, count + 1);
+                        }
+
+                        sb.AppendLine("Address of compile method is: " + CompileAddress.ToString("X"));
+
+                        long moduleStart = targetmscorjit.baseOfDll.ToInt64();
+                        long moduleEnd = moduleStart + targetmscorjit.sizeOfImage;
+
+                        if (CompileAddress < moduleStart || CompileAddress > moduleEnd)
+                        {
+                            sb.AppendLine("Address of compile method changed!!! Hook detected.");
+                        }
+                        else
+                        {
+                            sb.AppendLine("Address of compile method seems to be the original one!");
                         }
                     }
                     else
                     {
-                        textBox1.Text += "Failed to read from selected process!\r\n";
+                        sb.AppendLine("Failed to read from selected process!");
                     }
-                    ProcModule.CloseHandle(processHandle);
-                }  // end if is not .NET
+                }
             }
-            else
+            finally
             {
-                textBox1.Text += "Failed to open selected process!\r\n";
+                CloseHandle(processHandle);
             }
+            return sb.ToString();
         }
 
-        private void EnumEnvironmentVars()
+        private string EnumEnvironmentVars()
         {
-            Text = "Environment Variables for " + ProcessName + " whit PID=" + procid.ToString();
+            var sb = new StringBuilder();
+            sb.AppendLine("Enumerating environment variables for " + ProcessName + " with PID=" + procid.ToString());
 
-            if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+            IntPtr hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, (uint)procid);
+            if (hProcess == IntPtr.Zero)
             {
-                try
+                sb.AppendLine("Failed to open selected process!");
+                return sb.ToString();
+            }
+
+            try
+            {
+                PROCESS_BASIC_INFORMATION pbi = new();
+                int result = NtQueryInformationProcess(hProcess, 0, ref pbi, (uint)Marshal.SizeOf(pbi), out _);
+
+                if (result >= 0)
                 {
-                    IntPtr hProcess =
-                    OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, 0, (uint)procid);
-                    if (hProcess != IntPtr.Zero)
+                    bool isTarget64Bit = Is64BitProcess(hProcess);
+                    int processParametersOffsetInPeb = isTarget64Bit ? 0x20 : 0x10;
+                    int environmentOffsetInParams = isTarget64Bit ? 0x80 : 0x48;
+                    int pointerSize = isTarget64Bit ? 8 : 4;
+
+                    byte[] pebData = new byte[pointerSize];
+                    if (ReadProcessMemory(hProcess, new IntPtr(pbi.PebBaseAddress.ToInt64() + processParametersOffsetInPeb), pebData, (uint)pointerSize, out _))
                     {
-                        PROCESS_BASIC_INFORMATION pbi = new();
-                        int result = NtQueryInformationProcess(hProcess, 0, ref pbi, (uint)Marshal.SizeOf(pbi), out int bytesWritten);
-                        if (result >= 0)  // == 0 is OK
+                        long processParametersPtr = (pointerSize == 8) ? BitConverter.ToInt64(pebData, 0) : BitConverter.ToUInt32(pebData, 0);
+
+                        byte[] paramsData = new byte[pointerSize];
+                        if (ReadProcessMemory(hProcess, new IntPtr(processParametersPtr + environmentOffsetInParams), paramsData, (uint)pointerSize, out _))
                         {
-                            byte[] peb = new byte[472];
-                            uint BytesRead = 0;
-                            bool isok = ReadProcessMemory(hProcess, (IntPtr)pbi.PebBaseAddress, peb, (uint)peb.Length, ref BytesRead);
-                            if (isok)
+                            long environmentPtr = (pointerSize == 8) ? BitConverter.ToInt64(paramsData, 0) : BitConverter.ToUInt32(paramsData, 0);
+
+                            StringBuilder envBlock = new StringBuilder();
+                            byte[] buffer = new byte[1024];
+                            long currentAddress = environmentPtr;
+
+                            while (ReadProcessMemory(hProcess, new IntPtr(currentAddress), buffer, (uint)buffer.Length, out uint bytesRead) && bytesRead > 0)
                             {
-                                // this is on all Windows NT version - including Windows 7/Vista
-                                IntPtr AProcessParameters = (IntPtr)BitConverter.ToInt32(peb, 016);
-                                // RTL_USER_PROCESS_PARAMETERS structure
-                                byte[] datas = new byte[0x64];
-                                isok = ReadProcessMemory(hProcess, AProcessParameters, datas, (uint)datas.Length, ref BytesRead);
-                                if (isok)
+                                string chunk = Encoding.Unicode.GetString(buffer, 0, (int)bytesRead);
+                                int nullTerminator = chunk.IndexOf("\0\0");
+                                if (nullTerminator != -1)
                                 {
-                                    int EnvirAddress = BitConverter.ToInt32(datas, 072);
-                                    int blocksize = 0;
-                                    IntPtr raddress = (IntPtr)(EnvirAddress + blocksize);
-                                    int toskip = 0;
-
-                                    while (ReadProcessMemory(hProcess, raddress, datas, 4, ref BytesRead))
-                                    {
-                                        blocksize++;
-                                        raddress = (IntPtr)(EnvirAddress + blocksize);
-                                        if (toskip == 0 && datas[0] == 0 && datas[1] == 0)
-                                        {
-                                            toskip = blocksize;
-                                        }
-
-                                        if (datas[0] == 0 && datas[1] == 0
-                                        && datas[2] == 0 && datas[3] == 0)
-                                        {
-                                            break;
-                                        }
-                                    }
-                                    // read datas:
-                                    toskip += 2;
-                                    raddress = (IntPtr)(EnvirAddress + toskip);
-                                    datas = new byte[blocksize - toskip];
-                                    ReadProcessMemory(hProcess, raddress, datas, (uint)datas.Length, ref BytesRead);
-                                    Encoding encoding = Encoding.Unicode;
-                                    string envirstring = encoding.GetString(datas);
-                                    envirstring = envirstring.Replace("\x0000", "\r\n");
-                                    envirstring += "\r\n";
-                                    textBox1.Text = envirstring;
+                                    envBlock.Append(chunk.Substring(0, nullTerminator));
+                                    break;
                                 }
+                                envBlock.Append(chunk);
+                                currentAddress += bytesRead;
                             }
-                        }
 
-                        CloseHandle(hProcess);
+                            string finalEnv = envBlock.ToString().Replace("\0", "\r\n");
+                            return finalEnv;
+                        }
                     }
                 }
-                catch
-                {
-                }
+                return sb.ToString();
+            }
+            finally
+            {
+                CloseHandle(hProcess);
             }
         }
 
-        private void DirectoriesFilesList()
+        private string DirectoriesFilesList()
         {
-            Text = "Directories/Files from " + ProcessName + " whit PID=" + procid.ToString();
+            var sb = new StringBuilder();
+            sb.AppendLine("Scanning for Directories/Files from " + ProcessName + " with PID=" + procid.ToString());
 
             string filelist = "";
             string directorylist = "";
 
-            //try
-            //{
-            IntPtr hProcess =
-            OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, 0, (uint)procid);
-            if (hProcess != IntPtr.Zero)
+            IntPtr hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, (uint)procid);
+            if (hProcess == IntPtr.Zero)
             {
-                uint minaddress = 0;
-                uint maxaddress = 0xF0000000;
-                uint pagesize = 0x1000;
+                sb.AppendLine("Failed to open selected process!");
+                return sb.ToString();
+            }
 
-                try
-                {
-                    MainForm.SYSTEM_INFO pSI = new();
-                    MainForm.GetSystemInfo(ref pSI);
-                    minaddress = pSI.lpMinimumApplicationAddress;
-                    maxaddress = pSI.lpMaximumApplicationAddress;
-                    pagesize = pSI.dwPageSize;
-                }
-                catch
-                {
-                }
+            try
+            {
+                MainForm.SYSTEM_INFO pSI = new();
+                MainForm.GetSystemInfo(ref pSI);
 
-                bool isok;
+                ulong minaddress = (ulong)pSI.lpMinimumApplicationAddress.ToInt64();
+                ulong maxaddress = (ulong)pSI.lpMaximumApplicationAddress.ToInt64();
+                uint pagesize = pSI.dwPageSize > 0 ? pSI.dwPageSize : 4096;
+
                 byte[] onepage = new byte[pagesize];
-                uint BytesRead = 0;
 
-                for (uint j = minaddress; j < maxaddress; j += pagesize)
+                for (ulong j = minaddress; j < maxaddress; j += pagesize)
                 {
-                    isok = MainForm.ReadProcessMemory(hProcess, j, onepage, pagesize, ref BytesRead);
-
-                    if (isok)
+                    if (!ReadProcessMemory(hProcess, new IntPtr((long)j), onepage, pagesize, out _))
                     {
-                        for (int k = 0; k < onepage.Length; k++)
+                        continue;
+                    }
+
+                    string pageAsString = Encoding.ASCII.GetString(onepage);
+                    var matches = System.Text.RegularExpressions.Regex.Matches(pageAsString, @"[a-zA-Z]:\\[^:\*?""<>|\0]+");
+                    foreach (System.Text.RegularExpressions.Match match in matches)
+                    {
+                        string thepath = match.Value.Trim();
+                        try
                         {
-                            if (onepage[k] == 0x3A)
+                            if (File.Exists(thepath) && !filelist.Contains(thepath))
                             {
-                                byte[] testbyte = new byte[1];
-                                isok = MainForm.ReadProcessMemory(hProcess, (uint)(j + k + 1), testbyte, 1, ref BytesRead);
-                                bool IsFinded = false;
-                                bool unicode = false;
-
-                                if (isok)
-                                {
-                                    if (testbyte[0] == 0x5C)
-                                    {
-                                        IsFinded = true;
-                                        unicode = false;
-                                    }
-                                    else if (testbyte[0] == 0)
-                                    {
-                                        testbyte = new byte[2];
-                                        isok = MainForm.ReadProcessMemory(hProcess, (uint)(j + k + 2), testbyte, 2, ref BytesRead);
-                                        if (isok && testbyte[0] == 0x5C && testbyte[1] == 00)
-                                        {
-                                            IsFinded = true;
-                                            unicode = true;
-                                        }
-                                    }
-                                }
-
-                                if (IsFinded)
-                                {
-                                    string thepath = "";
-                                    testbyte = new byte[2];
-                                    testbyte[0] = 11;
-                                    uint l = 0;
-                                    int onecharbefore = 1;
-                                    if (unicode)  // if is unicode
-                                        onecharbefore++;
-
-                                    if (unicode)
-                                    {
-                                        _ = (uint)(j + k);
-                                    }
-
-                                    while (true)
-                                    {
-                                        isok = MainForm.ReadProcessMemory(hProcess, (uint)(j + k - onecharbefore + l), testbyte, 1, ref BytesRead);
-                                        if (isok && testbyte[0] != 0)
-                                        {
-                                            thepath += (char)testbyte[0];
-                                        }
-                                        else
-                                        {
-                                            break;
-                                        }
-                                        l++;
-                                        if (unicode)  // if is unicode
-                                            l++;
-                                    }
-
-                                    if (File.Exists(thepath) && !filelist.Contains(thepath))
-                                        filelist = filelist + thepath + "\r\n";
-
-                                    if (Directory.Exists(thepath) && !directorylist.Contains(thepath))
-                                        directorylist = directorylist + thepath + "\r\n";
-                                }  // end of IsFinded if
+                                filelist += thepath + "\r\n";
+                            }
+                            else if (Directory.Exists(thepath) && !directorylist.Contains(thepath))
+                            {
+                                directorylist += thepath + "\r\n";
                             }
                         }
+                        catch { }
                     }
                 }
-
-                textBox1.Text = "Directories:\r\n" + directorylist + "\r\n" +
-                    "Files:\r\n" + filelist + "\r\n";
-            }  // end of if the process can be opened!
-               //}
-               //catch
-               //{
-               //}
+                sb.AppendLine("Directories:\r\n" + directorylist);
+                sb.AppendLine("Files:\r\n" + filelist);
+                return sb.ToString();
+            }
+            finally
+            {
+                CloseHandle(hProcess);
+            }
         }
+
+
         public string modulename = "";
         public IntPtr baseaddress = IntPtr.Zero;
 
@@ -414,27 +369,25 @@ namespace Mega_Dumper
                 if ((sections[i].virtual_address <= rva) && (sections[i].virtual_address + sections[i].virtual_size >= rva))
                     return i;
             }
-
             return -1;
         }
 
-        private unsafe void CodeSectionDifferences()
+        private unsafe string CodeSectionDifferences()
         {
-            Text = "Process name: " + ProcessName + "; PID=" + procid.ToString();
-            textBox1.Text = "Code section diferences in module " + modulename + " base address:" +
-                baseaddress.ToString("X4") + "\r\n";
+            var sb = new StringBuilder();
+            sb.AppendLine("Code section differences in module " + modulename + " base address:" + baseaddress.ToString("X"));
 
             if (!File.Exists(modulename))
             {
-                textBox1.Text = textBox1.Text + "The file: " + modulename + "don't exist!" +
-                    "Finding diferences aborted!" + "\r\n";
+                sb.AppendLine("The file: " + modulename + " does not exist!");
+                sb.AppendLine("Finding differences aborted!");
             }
             else
             {
                 byte[] filebytes = File.ReadAllBytes(modulename);
                 if (filebytes.Length < 0x200 || filebytes[0] != 0x4D || filebytes[1] != 0x5A)
                 {
-                    textBox1.Text = textBox1.Text + "Invalid PE file: " + modulename + "\r\n";
+                    sb.AppendLine("Invalid PE file: " + modulename);
                 }
                 else
                 {
@@ -442,7 +395,7 @@ namespace Mega_Dumper
                     if (PEOffset <= 0 || PEOffset >= filebytes.Length ||
                         filebytes[PEOffset] != 0x50 || filebytes[PEOffset + 1] != 0x45)
                     {
-                        textBox1.Text = textBox1.Text + "Invalid PE file: " + modulename + "\r\n";
+                        sb.AppendLine("Invalid PE file: " + modulename);
                     }
                     else
                     {
@@ -452,43 +405,57 @@ namespace Mega_Dumper
 
                         MainForm.image_section_header[] sections = new MainForm.image_section_header[nrofsection];
 
-                        long ptr = PEOffset + (long)sizeofoptionalheader + 4 +
+                        long ptr = PEOffset + sizeofoptionalheader + 4 +
                             Marshal.SizeOf(typeof(MainForm.IMAGE_FILE_HEADER));
+
                         byte[] datakeeper = new byte[Marshal.SizeOf(typeof(MainForm.image_section_header))];
-                        IntPtr pointer = IntPtr.Zero;
 
                         for (int i = 0; i < nrofsection; i++)
                         {
-                            Array.Copy(filebytes, ptr, datakeeper, 0, Marshal.SizeOf(typeof(MainForm.image_section_header)));
+                            Array.Copy(filebytes, ptr, datakeeper, 0, datakeeper.Length);
                             fixed (byte* p = datakeeper)
                             {
-                                pointer = (IntPtr)p;
+                                sections[i] = (MainForm.image_section_header)Marshal.PtrToStructure((IntPtr)p, typeof(MainForm.image_section_header));
                             }
-
-                            sections[i] = (MainForm.image_section_header)Marshal.PtrToStructure(pointer, typeof(MainForm.image_section_header));
-                            ptr += Marshal.SizeOf(typeof(MainForm.image_section_header));
+                            ptr += datakeeper.Length;
                         }
 
                         int codesectionindex = RVA2Section(sections, BaseOfCode);
                         if (codesectionindex == -1)
                         {
-                            textBox1.Text = textBox1.Text + "Failed to get code section for the file: " + modulename + "\r\n";
+                            sb.AppendLine("Failed to get code section for the file: " + modulename);
+                        }
+                        else
+                        {
+                            // TODO: Implement comparison logic here
+                            sb.AppendLine("Comparison logic not yet implemented.");
                         }
                     }
                 }
             }
+            return sb.ToString();
         }
 
-        private void EmptyFormShown(object sender, EventArgs e)
+        private async void EmptyFormShown(object sender, EventArgs e)
         {
-            if (whattodo == 1)
-                HoockDetect();
-            else if (whattodo == 2)
-                EnumEnvironmentVars();
-            else if (whattodo == 3)
-                DirectoriesFilesList();
-            else if (whattodo == 4)
-                CodeSectionDifferences();
+            // İşlemi arka plana alarak UI'nin donmasını engelle
+            this.SuspendLayout();
+            textBox1.Text = "İşlem yapılıyor, lütfen bekleyin...";
+
+            string result = await Task.Run(() => {
+                if (whattodo == 1)
+                    return HoockDetect();
+                else if (whattodo == 2)
+                    return EnumEnvironmentVars();
+                else if (whattodo == 3)
+                    return DirectoriesFilesList();
+                else if (whattodo == 4)
+                    return CodeSectionDifferences();
+                return "Bilinmeyen işlem.";
+            });
+
+            textBox1.Text = result;
+            this.ResumeLayout();
         }
     }
 }

@@ -133,7 +133,7 @@ namespace Mega_Dumper
             // 
             // isnet
             // 
-            this.isnet.Text = ".NET";
+            this.isnet.Text = "PE";
             // 
             // location
             // 
@@ -162,7 +162,7 @@ namespace Mega_Dumper
             // 
             this.dumpToolStripMenuItem.Name = "dumpToolStripMenuItem";
             this.dumpToolStripMenuItem.Size = new System.Drawing.Size(208, 22);
-            this.dumpToolStripMenuItem.Text = ".NET dump";
+            this.dumpToolStripMenuItem.Text = "PE dump";
             this.dumpToolStripMenuItem.Click += new System.EventHandler(this.DumpToolStripMenuItemClick);
             // 
             // dumpModuleToolStripMenuItem

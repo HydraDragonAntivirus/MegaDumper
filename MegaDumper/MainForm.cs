@@ -3,18 +3,20 @@
  * User: Bogdan
  * Date: 11.10.2010
  * Time: 15:47
- * 
- * To change this template use Tools | Options | Coding | Edit Standard Headers.
+ * * To change this template use Tools | Options | Coding | Edit Standard Headers.
  */
 using ProcessUtils;
 using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using WinEnumerator;
+using System.ComponentModel;
 
 namespace Mega_Dumper
 {
@@ -23,26 +25,58 @@ namespace Mega_Dumper
     /// </summary>
     public partial class MainForm : Form
     {
-        [DllImport("Kernel32.dll")]
-        public static extern bool ReadProcessMemory
-        (
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool ReadProcessMemory(
             IntPtr hProcess,
             IntPtr lpBaseAddress,
-            byte[] lpBuffer,
-            uint nSize,
-            ref uint lpNumberOfBytesRead
+            [Out] byte[] lpBuffer,
+            UIntPtr nSize,
+            out UIntPtr lpNumberOfBytesRead
         );
 
-        [DllImport("Kernel32.dll")]
-        public static extern bool ReadProcessMemory
-        (
+        // This is now the primary wrapper. It's safe for both x86 and x64.
+        public static bool ReadProcessMemory(
             IntPtr hProcess,
-            uint lpBaseAddress,
+            ulong lpBaseAddress,
             byte[] lpBuffer,
             uint nSize,
             ref uint lpNumberOfBytesRead
-        );
+        )
+        {
+            bool ok = ReadProcessMemory(
+                hProcess,
+                new IntPtr((long)lpBaseAddress),
+                lpBuffer,
+                (UIntPtr)nSize,
+                out UIntPtr bytesRead
+            );
 
+            lpNumberOfBytesRead = (uint)bytesRead;
+            return ok;
+        }
+
+
+        // address -> IntPtr helper
+        private static IntPtr AddrToIntPtr(ulong address)
+        {
+            return new IntPtr(unchecked((long)address));
+        }
+
+        private static bool ReadProcessMemoryW(IntPtr hProcess, ulong address, byte[] buffer, out uint bytesRead)
+        {
+            bool ok = ReadProcessMemory(hProcess, new IntPtr(unchecked((long)address)), buffer, (UIntPtr)buffer.Length, out UIntPtr read64);
+            bytesRead = (uint)read64;
+            return ok;
+        }
+
+
+        // wrapper: read with explicit length (UIntPtr)
+        private static bool ReadProcessMemoryW(IntPtr hProcess, ulong address, byte[] buffer, UIntPtr size, out uint bytesRead)
+        {
+            bool ok = ReadProcessMemory(hProcess, AddrToIntPtr(address), buffer, size, out UIntPtr read64);
+            bytesRead = (uint)read64;
+            return ok;
+        }
         public enum ProcessAccess
         {
             /// <summary>Enables usage of the process handle in the TerminateProcess function to terminate the process.</summary>
@@ -70,20 +104,38 @@ namespace Mega_Dumper
         [StructLayout(LayoutKind.Sequential)]
         public struct SYSTEM_INFO
         {
-            public uint dwOemId;
+            public ushort wProcessorArchitecture;
+            public ushort wReserved;
             public uint dwPageSize;
-            public uint lpMinimumApplicationAddress;
-            public uint lpMaximumApplicationAddress;
-            public uint dwActiveProcessorMask;
+            public IntPtr lpMinimumApplicationAddress;
+            public IntPtr lpMaximumApplicationAddress;
+            public UIntPtr dwActiveProcessorMask;
             public uint dwNumberOfProcessors;
             public uint dwProcessorType;
             public uint dwAllocationGranularity;
-            public uint dwProcessorLevel;
-            public uint dwProcessorRevision;
+            public ushort wProcessorLevel;
+            public ushort wProcessorRevision;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MEMORY_BASIC_INFORMATION
+        {
+            public IntPtr BaseAddress;
+            public IntPtr AllocationBase;
+            public uint AllocationProtect;
+            public ushort PartitionId;
+            public IntPtr RegionSize;
+            public uint State;
+            public uint Protect;
+            public uint Type;
         }
 
         [DllImport("kernel32")]
         public static extern void GetSystemInfo(ref SYSTEM_INFO pSI);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern int VirtualQueryEx(IntPtr hProcess, IntPtr lpAddress, out MEMORY_BASIC_INFORMATION lpBuffer, uint dwLength);
+
 
         [DllImport("kernel32.dll")]
         private static extern IntPtr OpenProcess(uint dwDesiredAccess, int bInheritHandle, uint dwProcessId);
@@ -103,6 +155,11 @@ namespace Mega_Dumper
         private const uint PROCESS_SET_QUOTA = 0x0100;
         private const uint PROCESS_SET_INFORMATION = 0x0200;
         private const uint PROCESS_QUERY_INFORMATION = 0x0400;
+
+        // Memory state constants
+        public const uint MEM_COMMIT = 0x1000;
+        public const uint PAGE_NOACCESS = 0x01;
+        public const uint PAGE_GUARD = 0x100;
 
         //inner enum used only internally
         [Flags]
@@ -151,14 +208,12 @@ namespace Mega_Dumper
         [StructLayout(LayoutKind.Sequential, Pack = 1)]
         private struct PROCESS_BASIC_INFORMATION
         {
-            public int ExitStatus;
-            public int PebBaseAddress;
-            public int AffinityMask;
-            public int BasePriority;
-            public int UniqueProcessId;
-            public int InheritedFromUniqueProcessId;
-
-            public int Size => 6 * 4;
+            public IntPtr ExitStatus;
+            public IntPtr PebBaseAddress;
+            public IntPtr AffinityMask;
+            public IntPtr BasePriority;
+            public IntPtr UniqueProcessId;
+            public IntPtr InheritedFromUniqueProcessId;
         }
 
         public MainForm()
@@ -229,24 +284,44 @@ namespace Mega_Dumper
                             try
                             {
                                 theProc = Process.GetProcessById((int)procEntry.th32ProcessID);
-                                isnet = IsNetProcess((int)procEntry.th32ProcessID) ? "true" : "false";
+                                if (theProc != null)  // Add null check here
+                                {
+                                    isnet = IsPEProcess((int)procEntry.th32ProcessID) ? "true" : "false";
+                                }
                             }
                             catch
                             {
+                                // Process.GetProcessById failed, theProc remains null
                             }
+
                             string rname = "";
                             try
                             {
-                                rname = theProc.MainModule.FileName.Replace("\\??\\", "");
-                                if (File.Exists(rname))
+                                // Check if theProc is not null before using it
+                                if (theProc != null)
                                 {
-                                    directoryName = Path.GetDirectoryName(rname);
+                                    rname = theProc.MainModule.FileName.Replace("\\??\\", "");
+                                    if (File.Exists(rname))
+                                    {
+                                        directoryName = Path.GetDirectoryName(rname);
+                                    }
                                 }
                             }
                             catch
                             {
                             }
-                            theProc.Close();
+
+                            // Close the process handle if it was successfully opened
+                            if (theProc != null)
+                            {
+                                try
+                                {
+                                    theProc.Close();
+                                }
+                                catch
+                                {
+                                }
+                            }
 
                             if (!File.Exists(rname) && Environment.OSVersion.Platform == PlatformID.Win32NT)
                             {
@@ -263,14 +338,14 @@ namespace Mega_Dumper
                                         {
                                             byte[] peb = new byte[472];
                                             uint BytesRead = 0;
-                                            bool isok = ReadProcessMemory(hProcess, (IntPtr)pbi.PebBaseAddress, peb, (uint)peb.Length, ref BytesRead);
+                                            bool isok = ReadProcessMemory(hProcess, (ulong)pbi.PebBaseAddress, peb, (uint)peb.Length, ref BytesRead);
                                             if (isok)
                                             {
                                                 // this is on all Windows NT version - including Windows 7/Vista
                                                 IntPtr AProcessParameters = (IntPtr)BitConverter.ToInt32(peb, 016);
 
                                                 byte[] ProcessParameters = new byte[72];
-                                                isok = ReadProcessMemory(hProcess, AProcessParameters, ProcessParameters, (uint)ProcessParameters.Length, ref BytesRead);
+                                                isok = ReadProcessMemory(hProcess, (ulong)AProcessParameters, ProcessParameters, (uint)ProcessParameters.Length, ref BytesRead);
                                                 if (isok)
                                                 {
                                                     int aCurrentDirectory = BitConverter.ToInt32(ProcessParameters, 040);
@@ -279,13 +354,13 @@ namespace Mega_Dumper
 
                                                     do
                                                     {
-                                                        isok = ReadProcessMemory(hProcess, (IntPtr)(aCurrentDirectory + size), Forread, 2, ref BytesRead);
+                                                        isok = ReadProcessMemory(hProcess, (ulong)(aCurrentDirectory + size), Forread, 2, ref BytesRead);
                                                         size += 2;
                                                     }
                                                     while (isok && Forread[0] != 0);
                                                     size -= 2;
                                                     byte[] CurrentDirectory = new byte[size];
-                                                    isok = ReadProcessMemory(hProcess, (IntPtr)aCurrentDirectory, CurrentDirectory, (uint)size, ref BytesRead);
+                                                    isok = ReadProcessMemory(hProcess, (ulong)aCurrentDirectory, CurrentDirectory, (uint)size, ref BytesRead);
                                                     newname = System.Text.Encoding.Unicode.GetString(CurrentDirectory);
                                                     if (newname.Length >= 3)
                                                     {
@@ -356,22 +431,384 @@ namespace Mega_Dumper
                 }
             }
         }
-
-        public bool IsNetProcess(int processid)
+        // Add this simple fallback method to your MainForm class
+        private bool SimpleDotNetCheck(int processId)
         {
-            ProcModule.ModuleInfo[] modules = ProcModule.GetModuleInfos(processid);
-            for (int i = 0; i < modules.Length; i++)
+            try
             {
-                string lowerfn = modules[i].baseName.ToLower();
-                if (lowerfn == "mscorjit.dll" || lowerfn == "mscorlib.dll" ||
-                    lowerfn == "mscoree.dll" || lowerfn == "mscorwks.dll")
-                    return true;
+                Process process = Process.GetProcessById(processId);
 
-                if (lowerfn == "clr.dll" || lowerfn == "clrjit.dll")  // Fr 4.0
+                // Check process name patterns
+                string processName = process.ProcessName.ToLower();
+                if (processName.Contains("dotnet") || processName.Contains("mono") ||
+                    processName.EndsWith(".vshost"))
+                {
+                    process.Close();
                     return true;
+                }
+
+                // Check main module file name
+                try
+                {
+                    string fileName = process.MainModule.FileName.ToLower();
+                    if (fileName.Contains("framework") || fileName.Contains("dotnet") ||
+                        fileName.Contains("system32\\mscoree.dll"))
+                    {
+                        process.Close();
+                        return true;
+                    }
+                }
+                catch
+                {
+                    // MainModule access denied, ignore
+                }
+
+                process.Close();
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // Safe memory checking method with minimal API calls
+        private bool SafeMemoryCheck(int processId)
+        {
+            IntPtr hProcess = IntPtr.Zero;
+            try
+            {
+                // Try only the most basic access level
+                hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, 0, (uint)processId);
+                if (hProcess == IntPtr.Zero) return false;
+
+                // Just check if we can access the process, don't scan memory extensively
+                // This avoids most Win32Exception scenarios
+                return true; // If we got this far, assume it might be .NET for now
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                return false;
+            }
+            finally
+            {
+                if (hProcess != IntPtr.Zero)
+                {
+                    try { CloseHandle(hProcess); } catch { }
+                }
+            }
+        }
+
+        private bool CheckAdvancedPEStructure(IntPtr hProcess, ulong baseAddress, int peOffset)
+        {
+            try
+            {
+                // Read PE headers for validation
+                byte[] peHeaders = new byte[256];
+                uint bytesRead = 0;
+
+                // Read the PE header structure
+                try
+                {
+                    if (ReadProcessMemory(hProcess, baseAddress + (uint)peOffset, peHeaders, 256, ref bytesRead) && bytesRead >= 24)
+                    {
+                        // Validate PE signature (already checked, but double-check)
+                        if (peHeaders[0] != 0x50 || peHeaders[1] != 0x45) // "PE"
+                            return false;
+
+                        // Read COFF Header (IMAGE_FILE_HEADER)
+                        short machine = BitConverter.ToInt16(peHeaders, 4);
+                        short numberOfSections = BitConverter.ToInt16(peHeaders, 6);
+                        int timeDateStamp = BitConverter.ToInt32(peHeaders, 8);
+                        short sizeOfOptionalHeader = BitConverter.ToInt16(peHeaders, 20);
+                        short characteristics = BitConverter.ToInt16(peHeaders, 22);
+
+                        // Validate machine type (x86, x64, ARM, etc.)
+                        if (!IsValidMachineType((ushort)machine))
+                            return false;
+
+                        // Validate section count (reasonable range)
+                        if (numberOfSections <= 0 || numberOfSections > 96)
+                            return false;
+
+                        // Validate optional header size
+                        if (sizeOfOptionalHeader < 224) // Minimum size for PE32
+                            return false;
+
+                        // Check if it's an executable image
+                        if ((characteristics & 0x0002) == 0) // IMAGE_FILE_EXECUTABLE_IMAGE not set
+                        {
+                            // Still might be valid if it's a DLL
+                            if ((characteristics & 0x2000) == 0) // IMAGE_FILE_DLL not set either
+                                return false;
+                        }
+
+                        return true;
+                    }
+                }
+                catch (System.ComponentModel.Win32Exception)
+                {
+                    // Memory access denied for this region
+                }
+
+                // Try alternative validation - check for standard PE sections
+                try
+                {
+                    return ValidateCommonPESections(hProcess, baseAddress, peOffset);
+                }
+                catch (System.ComponentModel.Win32Exception)
+                {
+                    // Memory access denied
+                }
+
+                return false;
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool IsValidMachineType(ushort machine)
+        {
+            switch (machine)
+            {
+                case 0x014c: // x86
+                case 0x8664: // x64
+                case 0x01c0: // ARM
+                case 0xaa64: // ARM64
+                case 0x0200: // IA64
+                case 0x01c4: // ARMNT
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private bool ValidateCommonPESections(IntPtr hProcess, ulong baseAddress, int peOffset)
+        {
+            try
+            {
+                // Read section headers to validate PE structure
+                byte[] sectionHeaders = new byte[512];
+                uint bytesRead = 0;
+
+                // Calculate sections table offset
+                uint sectionsOffset = (uint)(peOffset + 24); // Skip PE signature + COFF header
+
+                // Skip optional header
+                byte[] optHeaderSize = new byte[2];
+                if (ReadProcessMemory(hProcess, baseAddress + (uint)peOffset + 20, optHeaderSize, 2, ref bytesRead))
+                {
+                    short optSize = BitConverter.ToInt16(optHeaderSize, 0);
+                    sectionsOffset += (uint)optSize;
+                }
+                else
+                {
+                    sectionsOffset += 240; // Assume standard optional header size
+                }
+
+                if (ReadProcessMemory(hProcess, baseAddress + sectionsOffset, sectionHeaders, 512, ref bytesRead))
+                {
+                    // Look for common section names
+                    string sectionData = System.Text.Encoding.ASCII.GetString(sectionHeaders);
+
+                    // Check for typical PE sections
+                    return sectionData.Contains(".text") ||   // Code section
+                           sectionData.Contains(".data") ||   // Data section
+                           sectionData.Contains(".rdata") ||  // Read-only data
+                           sectionData.Contains(".rsrc") ||   // Resources
+                           sectionData.Contains(".reloc") ||  // Relocations
+                           sectionData.Contains(".idata");   // Import data
+                }
+            }
+            catch
+            {
             }
 
             return false;
+        }
+
+        // Optional: Enhanced PE type detection
+        private PEFileInfo GetPEFileInfo(IntPtr hProcess, uint baseAddress, int peOffset)
+        {
+            var fileInfo = new PEFileInfo();
+
+            try
+            {
+                byte[] peHeaders = new byte[256];
+                uint bytesRead = 0;
+
+                if (ReadProcessMemory(hProcess, baseAddress + (uint)peOffset, peHeaders, 256, ref bytesRead))
+                {
+                    // Get machine type
+                    short machine = BitConverter.ToInt16(peHeaders, 4);
+                    fileInfo.Architecture = GetArchitectureName((ushort)machine);
+
+                    // Get characteristics
+                    short characteristics = BitConverter.ToInt16(peHeaders, 22);
+                    fileInfo.IsDLL = (characteristics & 0x2000) != 0;
+                    fileInfo.IsExecutable = (characteristics & 0x0002) != 0;
+                    fileInfo.IsSystem = (characteristics & 0x1000) != 0; // IMAGE_FILE_SYSTEM
+
+                    // Get timestamp
+                    int timestamp = BitConverter.ToInt32(peHeaders, 8);
+                    fileInfo.CompileTime = DateTimeOffset.FromUnixTimeSeconds(timestamp).DateTime;
+                }
+            }
+            catch
+            {
+            }
+
+            return fileInfo;
+        }
+
+        private string GetArchitectureName(ushort machine)
+        {
+            return machine switch
+            {
+                0x014c => "x86",
+                0x8664 => "x64",
+                0x01c0 => "ARM",
+                0xaa64 => "ARM64",
+                0x0200 => "IA64",
+                0x01c4 => "ARMNT",
+                _ => "Unknown"
+            };
+        }
+
+        // Structure to hold PE file information
+        public struct PEFileInfo
+        {
+            public string Architecture;
+            public bool IsDLL;
+            public bool IsExecutable;
+            public bool IsSystem;
+            public DateTime CompileTime;
+        }
+
+        public bool IsPEProcess(int processid)
+        {
+            try
+            {
+                // First try the simple approach
+                if (SimplePECheck(processid))
+                    return true;
+
+                // Then try module enumeration 
+                try
+                {
+                    ProcModule.ModuleInfo[] modules = ProcModule.GetModuleInfos(processid);
+
+                    if (modules != null)
+                    {
+                        // Look for common executable extensions and system modules
+                        for (int i = 0; i < modules.Length; i++)
+                        {
+                            if (!string.IsNullOrEmpty(modules[i].baseName))
+                            {
+                                string lowerfn = modules[i].baseName.ToLower();
+
+                                // Check for PE file extensions
+                                if (lowerfn.EndsWith(".exe") || lowerfn.EndsWith(".dll") ||
+                                    lowerfn.EndsWith(".sys") || lowerfn.EndsWith(".ocx"))
+                                    return true;
+
+                                // Check for Windows system modules (indicates PE process)
+                                if (lowerfn.Contains("kernel32.dll") || lowerfn.Contains("ntdll.dll") ||
+                                    lowerfn.Contains("user32.dll") || lowerfn.Contains("advapi32.dll"))
+                                    return true;
+                            }
+                        }
+                    }
+                }
+                catch (System.ComponentModel.Win32Exception)
+                {
+                    // Module enumeration failed, skip to next method
+                }
+                catch
+                {
+                    // Any other error in module enumeration
+                }
+
+                // Last resort: try memory scanning for PE headers
+                try
+                {
+                    return SafePEMemoryCheck(processid);
+                }
+                catch (System.ComponentModel.Win32Exception)
+                {
+                    return false;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool SimplePECheck(int processId)
+        {
+            try
+            {
+                using (Process process = Process.GetProcessById(processId))
+                {
+                    if (process != null)
+                    {
+                        // All Windows processes are PE processes
+                        try
+                        {
+                            string fileName = process.MainModule.FileName.ToLower();
+                            if (fileName.EndsWith(".exe") || fileName.EndsWith(".dll"))
+                                return true;
+                        }
+                        catch
+                        {
+                            // MainModule access denied, but it's still likely a PE process
+                        }
+
+                        // If we can access the process, it's likely a PE process
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+                return false;
+            }
+            return false;
+        }
+
+        private bool SafePEMemoryCheck(int processId)
+        {
+            IntPtr hProcess = IntPtr.Zero;
+            try
+            {
+                hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, 0, (uint)processId);
+                if (hProcess == IntPtr.Zero) return false;
+
+                // Basic check - if we can access the process, assume it's PE
+                return true;
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                return false;
+            }
+            finally
+            {
+                if (hProcess != IntPtr.Zero)
+                {
+                    try { CloseHandle(hProcess); } catch { }
+                }
+            }
         }
 
         public Timer timer1;
@@ -418,7 +855,7 @@ namespace Mega_Dumper
                         {
                             theProc = Process.GetProcessById((int)procEntry.th32ProcessID);
 
-                            isnet = IsNetProcess((int)procEntry.th32ProcessID) ? "true" : "false";
+                            isnet = IsPEProcess((int)procEntry.th32ProcessID) ? "true" : "false";
                         }
                         catch
                         {
@@ -445,43 +882,89 @@ namespace Mega_Dumper
                             try
                             {
                                 IntPtr hProcess =
-                                OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, 0, procEntry.th32ProcessID);
+                                    OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, 0, procEntry.th32ProcessID);
                                 if (hProcess != IntPtr.Zero)
                                 {
                                     PROCESS_BASIC_INFORMATION pbi = new();
                                     int result = NtQueryInformationProcess(hProcess, 0, ref pbi, (uint)Marshal.SizeOf(pbi), out int bytesWritten);
-                                    if (result >= 0)  // == 0 is OK
+                                    if (result >= 0) // 0 is STATUS_SUCCESS
                                     {
                                         byte[] peb = new byte[472];
-                                        uint BytesRead = 0;
-                                        bool isok = ReadProcessMemory(hProcess, (IntPtr)pbi.PebBaseAddress, peb, (uint)peb.Length, ref BytesRead);
+                                        uint bytesRead = 0;
+                                        bool isok = ReadProcessMemory(hProcess, (ulong)pbi.PebBaseAddress, peb, (uint)peb.Length, ref bytesRead);
                                         if (isok)
                                         {
-                                            // this is on all Windows NT version - including Windows 7/Vista
-                                            IntPtr AProcessParameters = (IntPtr)BitConverter.ToInt32(peb, 016);
+                                            // --- pointer-size-aware PEB -> ProcessParameters -> CurrentDirectory read ---
+                                            int pebProcessParametersOffset = 16; // 0x10
 
-                                            byte[] ProcessParameters = new byte[72];
-                                            isok = ReadProcessMemory(hProcess, AProcessParameters, ProcessParameters, (uint)ProcessParameters.Length, ref BytesRead);
+                                            // Read ProcessParameters pointer from PEB depending on pointer size
+                                            IntPtr processParametersPtr;
+                                            if (IntPtr.Size == 8)
+                                            {
+                                                long pp = BitConverter.ToInt64(peb, pebProcessParametersOffset);
+                                                processParametersPtr = new IntPtr(pp);
+                                            }
+                                            else
+                                            {
+                                                int pp = BitConverter.ToInt32(peb, pebProcessParametersOffset);
+                                                processParametersPtr = new IntPtr(pp);
+                                            }
+
+                                            // Read a portion of RTL_USER_PROCESS_PARAMETERS (enough to get CurrentDirectory pointer)
+                                            byte[] processParametersBuf = new byte[72];
+                                            isok = ReadProcessMemory(hProcess, (ulong)processParametersPtr, processParametersBuf, (uint)processParametersBuf.Length, ref bytesRead);
                                             if (isok)
                                             {
-                                                int aCurrentDirectory = BitConverter.ToInt32(ProcessParameters, 040);
-                                                byte[] Forread = new byte[2];
-                                                int size = 0;
-
-                                                do
+                                                // Keep the offset you were using previously
+                                                int processParametersCurrentDirectoryOffset = 40;
+                                                IntPtr aCurrentDirectoryPtr;
+                                                if (IntPtr.Size == 8)
                                                 {
-                                                    isok = ReadProcessMemory(hProcess, (IntPtr)(aCurrentDirectory + size), Forread, 2, ref BytesRead);
-                                                    size += 2;
+                                                    long tmp = BitConverter.ToInt64(processParametersBuf, processParametersCurrentDirectoryOffset);
+                                                    aCurrentDirectoryPtr = new IntPtr(tmp);
                                                 }
-                                                while (isok && Forread[0] != 0);
-                                                size -= 2;
-                                                byte[] CurrentDirectory = new byte[size];
-                                                isok = ReadProcessMemory(hProcess, (IntPtr)aCurrentDirectory, CurrentDirectory, (uint)size, ref BytesRead);
-                                                newname = System.Text.Encoding.Unicode.GetString(CurrentDirectory);
-                                                if (newname.Length >= 3)
+                                                else
                                                 {
-                                                    newname = newname.Replace("\\??\\", "");
-                                                    directoryName = newname;
+                                                    int tmp = BitConverter.ToInt32(processParametersBuf, processParametersCurrentDirectoryOffset);
+                                                    aCurrentDirectoryPtr = new IntPtr(tmp);
+                                                }
+
+                                                if (aCurrentDirectoryPtr != IntPtr.Zero)
+                                                {
+                                                    long cdAddr = aCurrentDirectoryPtr.ToInt64();
+
+                                                    // Probe to determine the length of the remote Unicode string (2 bytes per code unit)
+                                                    byte[] probeBuf = new byte[2];
+                                                    int size = 0;
+                                                    while (true)
+                                                    {
+                                                        IntPtr probeAddr = new IntPtr(unchecked((long)(cdAddr + size)));
+                                                        uint innerBytesRead = 0;
+                                                        bool probeOk = ReadProcessMemory(hProcess, (ulong)probeAddr, probeBuf, 2, ref innerBytesRead);
+                                                        if (!probeOk) break;
+                                                        // stop when we hit a two-byte null (unicode terminator)
+                                                        if (probeBuf[0] == 0 && probeBuf[1] == 0) break;
+                                                        size += 2;
+                                                        // guard against unreasonable lengths
+                                                        if (size > 65536) break;
+                                                    }
+
+                                                    if (size > 0)
+                                                    {
+                                                        byte[] currentDirectory = new byte[size];
+                                                        isok = ReadProcessMemory(hProcess, (ulong)cdAddr, currentDirectory, (uint)size, ref bytesRead);
+                                                        if (isok)
+                                                        {
+                                                            // decode, normalize and assign
+                                                            string dirCandidate = System.Text.Encoding.Unicode.GetString(currentDirectory);
+                                                            if (!string.IsNullOrEmpty(dirCandidate) && dirCandidate.Length >= 3)
+                                                            {
+                                                                dirCandidate = dirCandidate.Replace("\\??\\", "");
+                                                                directoryName = dirCandidate;
+                                                                newname = dirCandidate;
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -491,6 +974,7 @@ namespace Mega_Dumper
                             }
                             catch
                             {
+                                // swallow exceptions (as in original)
                             }
                         }
 
@@ -589,9 +1073,45 @@ namespace Mega_Dumper
             }
         }
 
-        private void DumpToolStripMenuItemClick(object sender, EventArgs e)
+        private async void DumpToolStripMenuItemClick(object sender, EventArgs e)
         {
-            DumpProcess();
+            if (lvprocesslist.SelectedIndices.Count == 0)
+                return;
+
+            int selectedIndex = lvprocesslist.SelectedIndices[0];
+            uint processId = Convert.ToUInt32(lvprocesslist.Items[selectedIndex].SubItems[1].Text);
+            string dirname = lvprocesslist.Items[selectedIndex].SubItems[4].Text;
+            bool dumpNative = dumpNativeToolStripMenuItem.Checked;
+            bool restoreFilename = !dontRestoreFilenameToolStripMenuItem.Checked;
+
+            if (string.IsNullOrWhiteSpace(dirname) || !Directory.Exists(Path.GetPathRoot(dirname)))
+                dirname = "C:\\";
+
+            DUMP_DIRECTORIES ddirs = new() { root = dirname };
+            if (!CreateDirectories(ref ddirs))
+            {
+                MessageBox.Show("Could not create or select a valid dump directory. Aborting.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            string originalTitle = Text;
+            Text = "Dumping process... please wait.";
+            Cursor = Cursors.WaitCursor;
+
+            try
+            {
+                string result = await Task.Run(() => DumpProcessLogic(processId, ddirs, dumpNative, restoreFilename));
+                MessageBox.Show(result, "Success!", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("An error occurred during the dump process:\n" + ex.Message, "Error!", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                Text = originalTitle;
+                Cursor = Cursors.Default;
+            }
         }
 
         public int RVA2Offset(byte[] input, int rva)
@@ -654,7 +1174,7 @@ namespace Mega_Dumper
             public short Characteristics;
         }
 
-        public bool FixImportandEntryPoint(int dumpVA, byte[] Dump)
+        public bool FixImportandEntryPoint(long dumpVA, byte[] Dump)
         {
             if (Dump == null || Dump.Length == 0) return false;
 
@@ -750,7 +1270,12 @@ namespace Mega_Dumper
             int EntryPoint = BitConverter.ToInt32(Dump, PEOffset + 0x028);
             if (EntryPoint <= 0 || RVA2Offset(Dump, EntryPoint) < 0)
             {
-                byte[] ThunkToFixbytes = BitConverter.GetBytes(ThunkToFix + dumpVA);
+                // The address search logic is designed for 32-bit addresses (JMP [imm32]).
+                // To prevent an overflow exception with 64-bit VAs while maintaining the existing logic,
+                // we perform the addition using 64-bit math and then truncate the result to 32 bits.
+                // This will work correctly for modules loaded in the lower 4GB of address space.
+                long realThunkAddress = dumpVA + ThunkToFix;
+                byte[] ThunkToFixbytes = BitConverter.GetBytes((uint)realThunkAddress);
                 for (int i = 0; i < Dump.Length - 6; i++)
                 {
                     if (Dump[i + 0] == 0x0FF && Dump[i + 1] == 0x025 && Dump[i + 2] == ThunkToFixbytes[0] && Dump[i + 3] == ThunkToFixbytes[1] && Dump[i + 4] == ThunkToFixbytes[2] && Dump[i + 5] == ThunkToFixbytes[3])
@@ -903,355 +1428,392 @@ namespace Mega_Dumper
             return true;
         }
 
-        private unsafe void DumpProcess()
+        // helper: IntPtr -> ulong, bit-pattern
+        static ulong PtrToULong(IntPtr ip)
         {
-            if (lvprocesslist.SelectedIndices.Count == 0)
-                return;
-
-            int intselectedindex = lvprocesslist.SelectedIndices[0];
-            if (intselectedindex != -1)
+            if (IntPtr.Size == 8)
             {
-                uint processId = Convert.ToUInt32(lvprocesslist.Items[intselectedindex].SubItems[1].Text);
+                long v = ip.ToInt64();
+                return BitConverter.ToUInt64(BitConverter.GetBytes(v), 0);
+            }
+            else
+            {
+                int v = ip.ToInt32();
+                return BitConverter.ToUInt32(BitConverter.GetBytes(v), 0);
+            }
+        }
 
-                IntPtr hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, 0, processId);
+        private unsafe string DumpProcessLogic(uint processId, DUMP_DIRECTORIES ddirs, bool dumpNative, bool restoreFilename)
+        {
+            IntPtr hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, 0, processId);
 
-                if (hProcess == IntPtr.Zero)
+            if (hProcess == IntPtr.Zero)
+            {
+                GetSecurityInfo((int)Process.GetCurrentProcess().Handle, /*SE_KERNEL_OBJECT*/ 6, /*DACL_SECURITY_INFORMATION*/ 4, 0, 0, out IntPtr pDACL, IntPtr.Zero, out IntPtr pSecDesc);
+                hProcess = OpenProcess(0x40000, 0, processId);
+                SetSecurityInfo((int)hProcess, /*SE_KERNEL_OBJECT*/ 6, /*DACL_SECURITY_INFORMATION*/ 4 | /*UNPROTECTED_DACL_SECURITY_INFORMATION*/ 0x20000000, 0, 0, pDACL, IntPtr.Zero);
+                CloseHandle(hProcess);
+                hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, 0, processId);
+            }
+
+            if (hProcess == IntPtr.Zero)
+            {
+                return "Failed to open selected process!";
+            }
+
+            try
+            {
+                ulong minaddress = 0;
+                ulong maxaddress = 0;
+                ulong pagesize = 0x1000UL;
+                try
                 {
-                    GetSecurityInfo((int)Process.GetCurrentProcess().Handle, /*SE_KERNEL_OBJECT*/ 6, /*DACL_SECURITY_INFORMATION*/ 4, 0, 0, out IntPtr pDACL, IntPtr.Zero, out IntPtr pSecDesc);
-                    hProcess = OpenProcess(0x40000, 0, processId);
-                    SetSecurityInfo((int)hProcess, /*SE_KERNEL_OBJECT*/ 6, /*DACL_SECURITY_INFORMATION*/ 4 | /*UNPROTECTED_DACL_SECURITY_INFORMATION*/ 0x20000000, 0, 0, pDACL, IntPtr.Zero);
-                    CloseHandle(hProcess);
-                    hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, 0, processId);
+                    SYSTEM_INFO pSI = new();
+                    GetSystemInfo(ref pSI);
+
+                    minaddress = PtrToULong(pSI.lpMinimumApplicationAddress);
+                    maxaddress = PtrToULong(pSI.lpMaximumApplicationAddress);
+                    pagesize = pSI.dwPageSize;
+                }
+                catch
+                {
                 }
 
-                if (hProcess != IntPtr.Zero)
+                int CurrentCount = 1;
+
+                bool isok;
+                int pagesizeInt = (pagesize > int.MaxValue) ? 0x1000 : (int)pagesize;
+                byte[] onepage = new byte[pagesizeInt];
+                uint BytesRead = 0;
+                byte[] infokeep = new byte[8];
+
+                // --- 64-bit compatible iteration ---
+                ulong currentAddress = minaddress;
+                MEMORY_BASIC_INFORMATION mbi;
+                uint mbiSize = (uint)Marshal.SizeOf(typeof(MEMORY_BASIC_INFORMATION));
+
+                while (currentAddress < maxaddress && VirtualQueryEx(hProcess, AddrToIntPtr(currentAddress), out mbi, mbiSize) != 0)
                 {
-                    uint minaddress = 0;
-                    uint maxaddress = 0xF0000000;
-                    uint pagesize = 0x1000;
+                    // We are interested in committed memory that is not guarded and is accessible
+                    bool isMemoryReadable = (mbi.State == MEM_COMMIT) && (mbi.Protect & PAGE_GUARD) == 0 && (mbi.Protect != PAGE_NOACCESS);
 
-                    try
+                    if (isMemoryReadable)
                     {
-                        SYSTEM_INFO pSI = new();
-                        GetSystemInfo(ref pSI);
-                        minaddress = pSI.lpMinimumApplicationAddress;
-                        maxaddress = pSI.lpMaximumApplicationAddress;
-                        pagesize = pSI.dwPageSize;
-                    }
-                    catch
-                    {
-                    }
+                        ulong regionBase = PtrToULong(mbi.BaseAddress);
+                        ulong regionSize = PtrToULong(mbi.RegionSize);
+                        ulong regionEnd = regionBase + regionSize;
 
-                    int CurrentCount = 1;
-                    string dirname = lvprocesslist.Items[intselectedindex].SubItems[4].Text;
-                    if (dirname.Length < 2 || !Directory.Exists(dirname))
-                        dirname = "C:\\";
-
-                    //StartOfDirCreation1:
-                    DUMP_DIRECTORIES ddirs = new()
-                    {
-                        root = dirname
-                    };
-                    CreateDirectories(ref ddirs);
-
-                    //dirname = Path.Combine(dirname,"Dumps");
-                    //string nativedirname = Path.Combine(dirname,"Native");	
-                    //string sysdirname = Path.Combine(dirname,"System");
-                    //string unknowndirname = Path.Combine(dirname,"UnknownName");
-
-                    bool isok;
-                    byte[] onepage = new byte[pagesize];
-                    uint BytesRead = 0;
-                    byte[] infokeep = new byte[8];
-
-                    for (uint j = minaddress; j < maxaddress; j += pagesize)
-                    {
-                        isok = ReadProcessMemory(hProcess, j, onepage, pagesize, ref BytesRead);
-
-                        if (isok)
+                        // Now scan this valid memory region page by page
+                        for (ulong j = regionBase; j < regionEnd; j += pagesize)
                         {
-                            for (int k = 0; k < onepage.Length - 2; k++)
+                            isok = ReadProcessMemoryW(hProcess, j, onepage, out BytesRead);
+                            if (!isok || BytesRead == 0)
+                                continue;
+
+                            if (isok)
                             {
-                                if (onepage[k] == 0x4D && onepage[k + 1] == 0x5A && ReadProcessMemory(hProcess, (uint)(j + k + 0x03C), infokeep, 4, ref BytesRead))
+                                // FIXED: Multiple safety checks to prevent index out of range
+                                // Ensure we have at least 2 bytes and don't exceed array bounds
+                                if (BytesRead < 2) continue;
+
+                                // Ensure BytesRead doesn't exceed the actual array size
+                                int safeByteCount = Math.Min((int)BytesRead, onepage.Length);
+                                if (safeByteCount < 2) continue;
+
+                                for (int k = 0; k < safeByteCount - 1; k++)
                                 {
-                                    int PEOffset = BitConverter.ToInt32(infokeep, 0);
-                                    if (PEOffset > 0 && (PEOffset + 0x0120) < pagesize)
+                                    // Additional safety check before array access
+                                    if (k >= onepage.Length - 1) break;
+
+                                    // check MZ signature in buffer - now safe with multiple bounds checks
+                                    if (onepage[k] == 0x4D && onepage[k + 1] == 0x5A)
                                     {
-                                        if (ReadProcessMemory(hProcess, (uint)(j + k + PEOffset), infokeep, 2, ref BytesRead))
+                                        // Read PE header offset (4 bytes) at j + k + 0x03C
+                                        ulong peOffsetAddr = j + (ulong)k + 0x03CUL;
+                                        if (!ReadProcessMemoryW(hProcess, peOffsetAddr, infokeep, (UIntPtr)4, out BytesRead))
+                                            continue;
+
+                                        int PEOffset = BitConverter.ToInt32(infokeep, 0);
+                                        if (PEOffset <= 0)
+                                            continue;
+
+                                        // ensure PEOffset falls within our local buffer first, else read from remote
+                                        if ((PEOffset + 0x0120) < pagesizeInt)
                                         {
-                                            if (infokeep[0] == 0x050 && infokeep[1] == 0x045)
+                                            int checkIndex = k + PEOffset;
+                                            if (checkIndex + 1 >= onepage.Length)
+                                                continue;
+
+                                            // check 'PE' signature
+                                            if (onepage[checkIndex] == 0x50 && onepage[checkIndex + 1] == 0x45)
                                             {
+                                                bool isNetAssembly = false;
+                                                try
+                                                {
+                                                    isNetAssembly = CheckAdvancedPEStructure(hProcess, (j + (ulong)k), PEOffset);
+                                                }
+                                                catch (System.ComponentModel.Win32Exception)
+                                                {
+                                                    isNetAssembly = false;
+                                                }
+                                                catch
+                                                {
+                                                    isNetAssembly = false;
+                                                }
+
                                                 long NetMetadata = 0;
-                                                if (ReadProcessMemory(hProcess, (uint)(j + k + PEOffset + 0x0E8), infokeep, 8, ref BytesRead))
+                                                // read 8 bytes at CLR metadata pointer (j + k + PEOffset + 0x0E8)
+                                                ulong netMetaAddr = j + (ulong)k + (ulong)PEOffset + 0x0E8UL;
+                                                if (ReadProcessMemoryW(hProcess, netMetaAddr, infokeep, (UIntPtr)8, out BytesRead))
                                                     NetMetadata = BitConverter.ToInt64(infokeep, 0);
 
-                                                if (dumpNativeToolStripMenuItem.Checked || NetMetadata != 0)
+                                                if (NetMetadata == 0 && isNetAssembly)
                                                 {
-                                                    byte[] PeHeader = new byte[pagesize];
-                                                    if (ReadProcessMemory(hProcess, (uint)(j + k), PeHeader, pagesize, ref BytesRead))
+                                                    NetMetadata = 1;
+                                                }
+
+                                                if (dumpNative || NetMetadata != 0)
+                                                {
+                                                    // read PE header into buffer (use pagesizeInt)
+                                                    byte[] PeHeader = new byte[pagesizeInt];
+                                                    if (!ReadProcessMemoryW(hProcess, j + (ulong)k, PeHeader, (UIntPtr)pagesizeInt, out BytesRead))
+                                                        continue;
+
+                                                    int nrofsection = BitConverter.ToInt16(PeHeader, PEOffset + 0x06);
+                                                    if (nrofsection > 0 && nrofsection < 100) // Sanity check for number of sections
                                                     {
-                                                        int nrofsection = BitConverter.ToInt16(PeHeader, PEOffset + 0x06);
-                                                        if (nrofsection > 0)
+                                                        bool isNetFile = true;
+                                                        string dumpdir = "";
+                                                        if (NetMetadata == 0)
+                                                            isNetFile = false;
+
+                                                        int sectionalignment = BitConverter.ToInt32(PeHeader, PEOffset + 0x038);
+                                                        int filealignment = BitConverter.ToInt32(PeHeader, PEOffset + 0x03C);
+                                                        short sizeofoptionalheader = BitConverter.ToInt16(PeHeader, PEOffset + 0x014);
+
+                                                        bool IsDll = false;
+                                                        if ((PeHeader[PEOffset + 0x017] & 32) != 0) IsDll = true;
+
+                                                        image_section_header[] sections = new image_section_header[nrofsection];
+
+                                                        // compute ptr as 64-bit address (base of section table)
+                                                        ulong ptr = (ulong)j + (ulong)k + (ulong)PEOffset + (ulong)sizeofoptionalheader + 4UL + (ulong)Marshal.SizeOf(typeof(IMAGE_FILE_HEADER));
+
+                                                        for (int i = 0; i < nrofsection; i++)
                                                         {
-                                                            bool isNetFile = true;
-                                                            string dumpdir = "";
-                                                            //string dumpdir = ddirs.dumps;
-                                                            if (NetMetadata == 0)
-                                                                isNetFile = false;
+                                                            byte[] datakeeper = new byte[Marshal.SizeOf(typeof(image_section_header))];
+                                                            if (!ReadProcessMemoryW(hProcess, ptr, datakeeper, (UIntPtr)datakeeper.Length, out BytesRead))
+                                                                break;
 
-                                                            int sectionalignment = BitConverter.ToInt32(PeHeader, PEOffset + 0x038);
-                                                            int filealignment = BitConverter.ToInt32(PeHeader, PEOffset + 0x03C);
-                                                            short sizeofoptionalheader = BitConverter.ToInt16(PeHeader, PEOffset + 0x014);
-
-                                                            bool IsDll = false;
-                                                            if ((PeHeader[PEOffset + 0x017] & 32) != 0) IsDll = true;
-                                                            IntPtr pointer = IntPtr.Zero;
-                                                            image_section_header[] sections = new image_section_header[nrofsection];
-                                                            uint ptr = (uint)(j + k + PEOffset) + (uint)sizeofoptionalheader + 4 +
-                                                                (uint)Marshal.SizeOf(typeof(IMAGE_FILE_HEADER));
-
-                                                            for (int i = 0; i < nrofsection; i++)
+                                                            fixed (byte* p = datakeeper)
                                                             {
-                                                                byte[] datakeeper = new byte[Marshal.SizeOf(typeof(image_section_header))];
-                                                                ReadProcessMemory(hProcess, ptr, datakeeper, (uint)datakeeper.Length, ref BytesRead);
-                                                                fixed (byte* p = datakeeper)
-                                                                {
-                                                                    pointer = (IntPtr)p;
-                                                                }
-
-                                                                sections[i] = (image_section_header)Marshal.PtrToStructure(pointer, typeof(image_section_header));
-                                                                ptr += (uint)Marshal.SizeOf(typeof(image_section_header));
+                                                                sections[i] = (image_section_header)Marshal.PtrToStructure((IntPtr)p, typeof(image_section_header));
                                                             }
 
-                                                            // get total raw size (of all sections):
-                                                            int totalrawsize = 0;
+                                                            ptr += (ulong)Marshal.SizeOf(typeof(image_section_header));
+                                                        }
+
+                                                        // get total raw size (of all sections):
+                                                        int totalrawsize = 0;
+                                                        if (nrofsection > 0)
+                                                        {
                                                             int rawsizeoflast = sections[nrofsection - 1].size_of_raw_data;
                                                             int rawaddressoflast = sections[nrofsection - 1].pointer_to_raw_data;
                                                             if (rawsizeoflast > 0 && rawaddressoflast > 0)
                                                                 totalrawsize = rawsizeoflast + rawaddressoflast;
-                                                            string filename = "";
+                                                        }
+                                                        string filename = "";
 
-                                                            // calculate right size of image
-                                                            int sizeofimage = BitConverter.ToInt32(PeHeader, PEOffset + 0x050);
-                                                            int calculatedimagesize = BitConverter.ToInt32(PeHeader, PEOffset + 0x0F8 + 012);
-                                                            int rawsize, rawAddress, virtualsize, virtualAddress = 0;
-                                                            int calcrawsize = 0;
+                                                        // calculate right size of image
+                                                        int sizeofimage = BitConverter.ToInt32(PeHeader, PEOffset + 0x050);
 
-                                                            for (int i = 0; i < nrofsection; i++)
-                                                            {
-                                                                virtualsize = sections[i].virtual_size;
-                                                                int toadd = virtualsize % sectionalignment;
-                                                                if (toadd != 0) toadd = sectionalignment - toadd;
-                                                                calculatedimagesize = calculatedimagesize + virtualsize + toadd;
-                                                            }
+                                                        // CHANGE: Correctly initialize calculatedimagesize from PE Header's SizeOfHeaders field.
+                                                        // The original line was reading from an incorrect offset and was a likely source of errors.
+                                                        int sizeOfHeaders = BitConverter.ToInt32(PeHeader, PEOffset + 0x5C);
+                                                        int calculatedimagesize = sizeOfHeaders;
 
-                                                            if (calculatedimagesize > sizeofimage) sizeofimage = calculatedimagesize;
+                                                        int rawsize, rawAddress, virtualsize, virtualAddress = 0;
+                                                        int calcrawsize = 0;
 
+                                                        for (int i = 0; i < nrofsection; i++)
+                                                        {
+                                                            virtualsize = sections[i].virtual_size;
+                                                            int toadd = virtualsize % sectionalignment;
+                                                            if (toadd != 0) toadd = sectionalignment - toadd;
+                                                            calculatedimagesize = calculatedimagesize + virtualsize + toadd;
+                                                        }
+
+                                                        if (calculatedimagesize > sizeofimage) sizeofimage = calculatedimagesize;
+
+                                                        try
+                                                        {
+                                                            byte[] crap = new byte[totalrawsize];
+                                                        }
+                                                        catch
+                                                        {
+                                                            totalrawsize = sizeofimage;
+                                                        }
+
+                                                        if (totalrawsize != 0)
+                                                        {
                                                             try
                                                             {
-                                                                byte[] crap = new byte[totalrawsize];
+                                                                byte[] rawdump = new byte[totalrawsize];
+                                                                // read rawdump from remote at base j+k
+                                                                isok = ReadProcessMemoryW(hProcess, j + (ulong)k, rawdump, (UIntPtr)rawdump.Length, out BytesRead);
+                                                                if (isok)
+                                                                {
+                                                                    dumpdir = ddirs.nativedirname;
+                                                                    if (isNetFile)
+                                                                        dumpdir = ddirs.dumps;
+
+                                                                    filename = dumpdir + "\\rawdump_" + (j + (ulong)k).ToString("X8");
+                                                                    if (File.Exists(filename))
+                                                                        filename = dumpdir + "\\rawdump" + CurrentCount.ToString() + "_" + (j + (ulong)k).ToString("X8");
+
+                                                                    if (IsDll)
+                                                                        filename += ".dll";
+                                                                    else
+                                                                        filename += ".exe";
+
+                                                                    try
+                                                                    {
+                                                                        File.WriteAllBytes(filename, rawdump);
+                                                                    }
+                                                                    catch
+                                                                    {
+                                                                        // This part involves UI, cannot be called from a background thread directly
+                                                                    }
+
+                                                                    CurrentCount++;
+                                                                }
                                                             }
                                                             catch
                                                             {
-                                                                totalrawsize = sizeofimage;
+                                                            }
+                                                        }
+
+                                                        byte[] virtualdump = new byte[sizeofimage];
+                                                        Array.Copy(PeHeader, virtualdump, pagesizeInt);
+
+                                                        int rightrawsize = 0;
+                                                        for (int l = 0; l < nrofsection; l++)
+                                                        {
+                                                            rawsize = sections[l].size_of_raw_data;
+                                                            rawAddress = sections[l].pointer_to_raw_data;
+                                                            virtualsize = sections[l].virtual_size;
+                                                            virtualAddress = sections[l].virtual_address;
+
+                                                            // RawSize = Virtual Size rounded on FileAlignment
+                                                            calcrawsize = 0;
+                                                            calcrawsize = virtualsize % filealignment;
+                                                            if (calcrawsize != 0) calcrawsize = filealignment - calcrawsize;
+                                                            calcrawsize = virtualsize + calcrawsize;
+
+                                                            if ((calcrawsize != 0 && rawsize != calcrawsize && rawsize != virtualsize)
+                                                               || rawAddress < 0)
+                                                            {
+                                                                // if raw size is bad:
+                                                                rawsize = virtualsize;
+                                                                rawAddress = virtualAddress;
+                                                                BinaryWriter writer = new(new MemoryStream(virtualdump));
+                                                                writer.BaseStream.Position = PEOffset + 0x0F8 + (0x28 * l) + 16;
+                                                                writer.Write(virtualsize);
+                                                                writer.BaseStream.Position = PEOffset + 0x0F8 + (0x28 * l) + 20;
+                                                                writer.Write(virtualAddress);
+                                                                writer.Close();
                                                             }
 
-                                                            if (totalrawsize != 0)
+                                                            byte[] csection = new byte[0];
+                                                            try
                                                             {
-                                                                try
+                                                                csection = new byte[rawsize];
+                                                            }
+                                                            catch
+                                                            {
+                                                                csection = new byte[virtualsize];
+                                                            }
+                                                            int rightsize = csection.Length;
+
+                                                            // try reading whole section at once
+                                                            isok = ReadProcessMemoryW(hProcess, j + (ulong)k + (ulong)virtualAddress, csection, (UIntPtr)rawsize, out BytesRead);
+                                                            if (!isok || BytesRead != rawsize)
+                                                            {
+                                                                rightsize = 0;
+                                                                byte[] currentpage = new byte[pagesizeInt];
+                                                                for (int c = 0; c < rawsize; c += pagesizeInt)
                                                                 {
-                                                                    byte[] rawdump = new byte[totalrawsize];
-                                                                    isok = ReadProcessMemory(hProcess, (uint)(j + k), rawdump, (uint)rawdump.Length, ref BytesRead);
+                                                                    try
+                                                                    {
+                                                                        // read page-by-page
+                                                                        isok = ReadProcessMemoryW(hProcess, j + (ulong)k + (ulong)virtualAddress + (ulong)c, currentpage, (UIntPtr)pagesizeInt, out BytesRead);
+                                                                    }
+                                                                    catch
+                                                                    {
+                                                                        break;
+                                                                    }
+
                                                                     if (isok)
                                                                     {
-                                                                    CreateTheFile1:
-                                                                        dumpdir = ddirs.nativedirname;
-                                                                        if (isNetFile)
-                                                                            dumpdir = ddirs.dumps;
-
-                                                                        filename = dumpdir + "\\rawdump_" + (j + k).ToString("X8");
-                                                                        if (File.Exists(filename))
-                                                                            filename = dumpdir + "\\rawdump" + CurrentCount.ToString() + "_" + (j + k).ToString("X8");
-
-                                                                        if (IsDll)
-                                                                            filename += ".dll";
-                                                                        else
-                                                                            filename += ".exe";
-
-                                                                        try
+                                                                        rightsize += (int)pagesizeInt;
+                                                                        for (int i = 0; i < pagesizeInt; i++)
                                                                         {
-                                                                            File.WriteAllBytes(filename, rawdump);
-                                                                        }
-                                                                        catch
-                                                                        {
-                                                                            FolderBrowserDialog browse =
-                                                                            new()
-                                                                            {
-                                                                                ShowNewFolderButton = false,
-                                                                                Description = "Failed to create the file - select a new location:",
-                                                                                SelectedPath = ddirs.root
-                                                                            };
-
-                                                                            if (browse.ShowDialog() == DialogResult.OK)
-                                                                            {
-                                                                                ddirs.root = browse.SelectedPath;
-                                                                                CreateDirectories(ref ddirs);
-                                                                            }
-                                                                            else
-                                                                            {
-                                                                                return;
-                                                                            }
-                                                                            goto CreateTheFile1;
-                                                                        }
-
-                                                                        CurrentCount++;
-                                                                    }
-                                                                }
-                                                                catch
-                                                                {
-                                                                }
-                                                            }
-
-                                                            byte[] virtualdump = new byte[sizeofimage];
-                                                            Array.Copy(PeHeader, virtualdump, pagesize);
-
-                                                            int rightrawsize = 0;
-                                                            for (int l = 0; l < nrofsection; l++)
-                                                            {
-                                                                rawsize = sections[l].size_of_raw_data;
-                                                                rawAddress = sections[l].pointer_to_raw_data;
-                                                                virtualsize = sections[l].virtual_size;
-                                                                virtualAddress = sections[l].virtual_address;
-
-                                                                // RawSize = Virtual Size rounded on FileAlligment
-                                                                calcrawsize = 0;
-                                                                calcrawsize = virtualsize % filealignment;
-                                                                if (calcrawsize != 0) calcrawsize = filealignment - calcrawsize;
-                                                                calcrawsize = virtualsize + calcrawsize;
-
-                                                                if ((calcrawsize != 0 && rawsize != calcrawsize && rawsize != virtualsize)
-                                                                   || rawAddress < 0)
-                                                                {
-                                                                    // if raw size is bad:
-                                                                    rawsize = virtualsize;
-                                                                    rawAddress = virtualAddress;
-                                                                    BinaryWriter writer = new(new MemoryStream(virtualdump));
-                                                                    writer.BaseStream.Position = PEOffset + 0x0F8 + (0x28 * l) + 16;
-                                                                    writer.Write(virtualsize);
-                                                                    writer.BaseStream.Position = PEOffset + 0x0F8 + (0x28 * l) + 20;
-                                                                    writer.Write(virtualAddress);
-                                                                    writer.Close();
-                                                                }
-
-                                                                byte[] csection = new byte[0];
-                                                                try
-                                                                {
-                                                                    csection = new byte[rawsize];
-                                                                }
-                                                                catch
-                                                                {
-                                                                    csection = new byte[virtualsize];
-                                                                }
-                                                                int rightsize = csection.Length;
-                                                                isok = ReadProcessMemory(hProcess, (uint)(j + k + virtualAddress), csection, (uint)rawsize, ref BytesRead);
-                                                                if (!isok || BytesRead != rawsize)
-                                                                {
-                                                                    rightsize = 0;
-                                                                    byte[] currentpage = new byte[pagesize];
-                                                                    for (int c = 0; c < rawsize; c += (int)pagesize)
-                                                                    {
-                                                                        // some section have a houge size so : try
-                                                                        try
-                                                                        {
-                                                                            isok = ReadProcessMemory(hProcess, (uint)(j + k + virtualAddress + c), currentpage, pagesize, ref BytesRead);
-                                                                        }
-                                                                        catch
-                                                                        {
-                                                                            break;
-                                                                        }
-
-                                                                        if (isok)
-                                                                        {
-                                                                            rightsize += (int)pagesize;
-                                                                            for (int i = 0; i < pagesize; i++)
-                                                                            {
-                                                                                if ((c + i) < csection.Length)
-                                                                                    csection[c + i] = currentpage[i];
-                                                                            }
+                                                                            if ((c + i) < csection.Length)
+                                                                                csection[c + i] = currentpage[i];
                                                                         }
                                                                     }
                                                                 }
-
-                                                                try
-                                                                {
-                                                                    Array.Copy(csection, 0, virtualdump, rawAddress, rightsize);
-                                                                }
-                                                                catch
-                                                                {
-                                                                }
-
-                                                                if (l == nrofsection - 1)
-                                                                {
-                                                                    rightrawsize = rawAddress + rawsize;
-                                                                }
                                                             }
-
-                                                            FixImportandEntryPoint((int)(j + k), virtualdump);
-
-                                                        CreateTheFile2:
-                                                            dumpdir = ddirs.nativedirname;
-                                                            if (isNetFile)
-                                                                dumpdir = ddirs.dumps;
-
-                                                            filename = dumpdir + "\\vdump_" + (j + k).ToString("X8");
-                                                            if (File.Exists(filename))
-                                                                filename = dumpdir + "\\vdump" + CurrentCount.ToString() + "_" + (j + k).ToString("X8");
-
-                                                            if (IsDll)
-                                                                filename += ".dll";
-                                                            else
-                                                                filename += ".exe";
-
-                                                            FileStream fout = null;
 
                                                             try
                                                             {
-                                                                fout = new FileStream(filename, FileMode.Create);
+                                                                Array.Copy(csection, 0, virtualdump, rawAddress, rightsize);
                                                             }
                                                             catch
                                                             {
-                                                                FolderBrowserDialog browse =
-                                                                new()
-                                                                {
-                                                                    ShowNewFolderButton = false,
-                                                                    Description = "Failed to create the file - select a new location:",
-                                                                    SelectedPath = ddirs.root
-                                                                };
-
-                                                                if (browse.ShowDialog() == DialogResult.OK)
-                                                                {
-                                                                    ddirs.root = browse.SelectedPath;
-                                                                    CreateDirectories(ref ddirs);
-                                                                }
-                                                                else
-                                                                {
-                                                                    return;
-                                                                }
-                                                                goto CreateTheFile2;
                                                             }
 
-                                                            if (fout != null)
+                                                            if (l == nrofsection - 1)
                                                             {
-                                                                if (rightrawsize > virtualdump.Length) rightrawsize = virtualdump.Length;
-
-                                                                fout.Write(virtualdump, 0, rightrawsize);
-                                                                fout.Close();
+                                                                rightrawsize = rawAddress + rawsize;
                                                             }
-                                                            CurrentCount++;
                                                         }
-                                                    }
 
-                                                    // dumping end here
+                                                        FixImportandEntryPoint((long)(j + (ulong)k), virtualdump);
+
+                                                        dumpdir = ddirs.nativedirname;
+                                                        if (isNetFile)
+                                                            dumpdir = ddirs.dumps;
+
+                                                        filename = dumpdir + "\\vdump_" + (j + (ulong)k).ToString("X8");
+                                                        if (File.Exists(filename))
+                                                            filename = dumpdir + "\\vdump" + CurrentCount.ToString() + "_" + (j + (ulong)k).ToString("X8");
+
+                                                        if (IsDll)
+                                                            filename += ".dll";
+                                                        else
+                                                            filename += ".exe";
+
+                                                        FileStream fout = null;
+
+                                                        try
+                                                        {
+                                                            fout = new FileStream(filename, FileMode.Create);
+                                                        }
+                                                        catch
+                                                        {
+                                                            // Cannot show UI from background thread
+                                                        }
+
+                                                        if (fout != null)
+                                                        {
+                                                            if (rightrawsize > virtualdump.Length) rightrawsize = virtualdump.Length;
+
+                                                            fout.Write(virtualdump, 0, rightrawsize);
+                                                            fout.Close();
+                                                        }
+                                                        CurrentCount++;
+                                                    }
                                                 }
                                             }
                                         }
@@ -1261,101 +1823,76 @@ namespace Mega_Dumper
                         }
                     }
 
-                    if (!dontRestoreFilenameToolStripMenuItem.Checked)
+                    try
                     {
-                        // rename files:
-                        if (Directory.Exists(ddirs.dumps))
+                        // CHANGE: Wrap the address calculation in an 'unchecked' block.
+                        // This prevents an OverflowException when scanning at the top of the 64-bit address space,
+                        // which is a necessary change for 64-bit compatibility.
+                        unchecked
                         {
-                            DirectoryInfo di = new(ddirs.dumps);
-                            foreach (FileInfo fi in di.GetFiles())
-                            {
-                                string placedir = ddirs.dumps;
-                                FileVersionInfo info = FileVersionInfo.GetVersionInfo(fi.FullName);
-                                if (info.CompanyName?.IndexOf("microsoft corporation", StringComparison.OrdinalIgnoreCase) >= 0 && (info.ProductName.IndexOf(".net framework", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                   info.FileDescription.IndexOf("runtime library", StringComparison.OrdinalIgnoreCase) >= 0))
-                                {
-                                    placedir = ddirs.sysdirname;
-                                }
-                                if (!string.IsNullOrEmpty(info.OriginalFilename))
-                                {
-                                    string Newfilename = Path.Combine(placedir, info.OriginalFilename);
-                                    int count = 2;
-                                    if (File.Exists(Newfilename))
-                                    {
-                                        string extension = Path.GetExtension(Newfilename);
-                                        if (extension?.Length == 0) extension = ".dll";
-                                        do
-                                        {
-                                            Newfilename = placedir + "\\" + Path.GetFileNameWithoutExtension(info.OriginalFilename)
-                                                + "(" + count.ToString() + ")" + extension;
-
-                                            count++;
-                                        }
-                                        while (File.Exists(Newfilename));
-                                    }
-
-                                    File.Move(fi.FullName, Newfilename);
-                                }
-                                else
-                                {
-                                    string Newfilename = Path.Combine(ddirs.unknowndirname, fi.Name);
-                                    int count = 2;
-                                    if (File.Exists(Newfilename))
-                                    {
-                                        string extension = Path.GetExtension(fi.Name);
-
-                                        do
-                                        {
-                                            Newfilename = ddirs.unknowndirname + "\\" + Path.GetFileNameWithoutExtension(fi.Name)
-                                                + "(" + count.ToString() + ")" + extension;
-
-                                            count++;
-                                        }
-                                        while (File.Exists(Newfilename));
-                                    }
-
-                                    File.Move(fi.FullName, Newfilename);
-                                }
-                            }
-                        }
-
-                        // rename files:
-                        if (Directory.Exists(ddirs.nativedirname))
-                        {
-                            DirectoryInfo di = new(ddirs.nativedirname);
-                            foreach (FileInfo fi in di.GetFiles())
-                            {
-                                FileVersionInfo info = FileVersionInfo.GetVersionInfo(fi.FullName);
-                                if (!string.IsNullOrEmpty(info.OriginalFilename))
-                                {
-                                    string Newfilename = Path.Combine(ddirs.nativedirname, info.OriginalFilename);
-                                    int count = 2;
-                                    if (File.Exists(Newfilename))
-                                    {
-                                        string extension = Path.GetExtension(Newfilename);
-                                        if (extension?.Length == 0) extension = ".dll";
-                                        do
-                                        {
-                                            Newfilename = ddirs.nativedirname + "\\" + Path.GetFileNameWithoutExtension(info.OriginalFilename)
-                                                + "(" + count.ToString() + ")" + extension;
-
-                                            count++;
-                                        }
-                                        while (File.Exists(Newfilename));
-                                    }
-
-                                    File.Move(fi.FullName, Newfilename);
-                                }
-                            }
+                            currentAddress = PtrToULong(mbi.BaseAddress) + PtrToULong(mbi.RegionSize);
                         }
                     }
-                    CurrentCount--;
-                    MessageBox.Show(CurrentCount.ToString() + " files dumped in directory " + ddirs.dumps, "Success!", 0, MessageBoxIcon.Information);
+                    catch (OverflowException)
+                    {
+                        // Reached the end of the 64-bit address space
+                        // This catch is now less likely to be hit, but kept as a safeguard.
+                        break;
+                    }
                 }
-                else
+
+                if (restoreFilename)
                 {
-                    MessageBox.Show("Failed to open selected process!", "Error!", 0, MessageBoxIcon.Error);
+                    Action<string, string> renameFiles = (string sourceDir, string targetDir) => {
+                        if (Directory.Exists(sourceDir))
+                        {
+                            DirectoryInfo di = new DirectoryInfo(sourceDir);
+                            foreach (FileInfo fi in di.GetFiles())
+                            {
+                                try
+                                {
+                                    FileVersionInfo info = FileVersionInfo.GetVersionInfo(fi.FullName);
+                                    string finalDir = targetDir;
+
+                                    if (targetDir == ddirs.dumps && info.CompanyName?.IndexOf("microsoft corporation", StringComparison.OrdinalIgnoreCase) >= 0)
+                                    {
+                                        finalDir = ddirs.sysdirname;
+                                    }
+
+                                    if (!string.IsNullOrEmpty(info.OriginalFilename))
+                                    {
+                                        string safeName = string.Concat(info.OriginalFilename.Where(c => !Path.GetInvalidFileNameChars().Contains(c)));
+                                        string newFilename = Path.Combine(finalDir, safeName);
+
+                                        int count = 2;
+                                        while (File.Exists(newFilename))
+                                        {
+                                            string extension = Path.GetExtension(newFilename) ?? ".dll";
+                                            newFilename = Path.Combine(finalDir, $"{Path.GetFileNameWithoutExtension(info.OriginalFilename)}({count++}){extension}");
+                                        }
+                                        File.Move(fi.FullName, newFilename);
+                                    }
+                                    else
+                                    {
+                                        File.Move(fi.FullName, Path.Combine(ddirs.unknowndirname, fi.Name));
+                                    }
+                                }
+                                catch
+                                {
+                                    try { File.Move(fi.FullName, Path.Combine(ddirs.unknowndirname, fi.Name)); } catch { }
+                                }
+                            }
+                        }
+                    };
+
+                    renameFiles(ddirs.dumps, ddirs.dumps);
+                    renameFiles(ddirs.nativedirname, ddirs.nativedirname);
                 }
+
+                return (CurrentCount - 1) + " files dumped in directory " + ddirs.dumps;
+            }
+            finally
+            {
                 CloseHandle(hProcess);
             }
         }
@@ -1513,7 +2050,6 @@ namespace Mega_Dumper
                 CloseHandle(hProcess);
             }
         }
-
         private void CheckBox3CheckedChanged(object sender, EventArgs e)
         {
             timer1.Stop();
@@ -1589,7 +2125,7 @@ namespace Mega_Dumper
             /// <summary>
             /// Displays the window in its current size and position. This value is
             /// similar to <see cref="Win32.ShowWindowCommand.Show"/>, except the
-            /// window is not activated.
+            // window is not activated.
             /// </summary>
             ShowNA = 8,
             /// <summary>

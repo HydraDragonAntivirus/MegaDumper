@@ -723,15 +723,35 @@ namespace ProcessUtils
             public uint AddressOfNameOrdinals;  // RVA from base of image
         }
 
-        [DllImport("Kernel32.dll")]
-        public static extern bool ReadProcessMemory
-        (
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "ReadProcessMemory")]
+        public static extern bool ReadProcessMemory(
+            IntPtr hProcess,
+            IntPtr lpBaseAddress,
+            [Out] byte[] lpBuffer,
+            UIntPtr nSize,
+            out UIntPtr lpNumberOfBytesRead
+        );
+
+        // Back-compat wrapper keeping your exact signature (uint size + ref uint bytesRead)
+        public static bool ReadProcessMemory(
             IntPtr hProcess,
             IntPtr lpBaseAddress,
             byte[] lpBuffer,
             uint nSize,
             ref uint lpNumberOfBytesRead
-        );
+        )
+        {
+            bool ok = ReadProcessMemory(
+                hProcess,
+                lpBaseAddress,
+                lpBuffer,
+                (UIntPtr)nSize,
+                out UIntPtr bytesRead
+            );
+
+            lpNumberOfBytesRead = (uint)bytesRead; // safe for typical reads < uint.MaxValue
+            return ok;
+        }
 
         public static unsafe int ProcGetExpAddress(
         IntPtr hprocess, IntPtr hmodule, string exportnname)

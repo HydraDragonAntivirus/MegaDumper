@@ -76,26 +76,48 @@ namespace Mega_Dumper
 
         [DllImport("kernel32.dll")]
         private static extern IntPtr OpenProcess(uint dwDesiredAccess, int bInheritHandle, uint dwProcessId);
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "ReadProcessMemory")]
+        public static extern bool ReadProcessMemory(
+            IntPtr hProcess,
+            IntPtr lpBaseAddress,
+            [Out] byte[] lpBuffer,
+            UIntPtr nSize,
+            out UIntPtr lpNumberOfBytesRead
+        );
 
-        [DllImport("Kernel32.dll")]
-        public static extern bool ReadProcessMemory
-        (
+        // Compatibility wrapper: IntPtr base address, uint size, ref uint bytes read (old-style)
+        public static bool ReadProcessMemory(
             IntPtr hProcess,
             IntPtr lpBaseAddress,
             byte[] lpBuffer,
             uint nSize,
             ref uint lpNumberOfBytesRead
-        );
+        )
+        {
+            bool ok = ReadProcessMemory(
+                hProcess,
+                lpBaseAddress,
+                lpBuffer,
+                (UIntPtr)nSize,
+                out UIntPtr bytesRead
+            );
 
-        [DllImport("Kernel32.dll")]
-        public static extern bool ReadProcessMemory
-        (
+            lpNumberOfBytesRead = (uint)bytesRead; // safe when reads < uint.MaxValue
+            return ok;
+        }
+
+        // Compatibility wrapper: uint base address (old signature), uint size, ref uint bytes read
+        // NOTE: using the uint overload on x64 will truncate real 64-bit addresses — use only when target addresses are actually 32-bit.
+        public static bool ReadProcessMemory(
             IntPtr hProcess,
             uint lpBaseAddress,
             byte[] lpBuffer,
             uint nSize,
             ref uint lpNumberOfBytesRead
-        );
+        )
+        {
+            return ReadProcessMemory(hProcess, new IntPtr(unchecked((long)lpBaseAddress)), lpBuffer, nSize, ref lpNumberOfBytesRead);
+        }
 
         private ProcModule.ModuleInfo[] modules = null;
         private void EnumModules()

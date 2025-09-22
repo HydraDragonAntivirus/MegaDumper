@@ -280,31 +280,154 @@ namespace Mega_Dumper
         }
 
         /// <summary>
-        /// Generates a whitelist file by hashing all PE executables on the system drive.
+        /// Generates a whitelist file where each entry is a memory-address based hash
+        /// (derived from process id + base address where a PE 'MZ' header was detected).
+        /// This replaces the previous disk SHA256-based whitelist generator.
         /// </summary>
-        /// <param name="outputPath">The path to save the whitelist file.</param>
         public void GenerateWhitelist(string outputPath)
         {
-            Console.WriteLine("Starting whitelist generation. This may take a while...");
-            string systemDrive = Path.GetPathRoot(Environment.SystemDirectory);
-            if (string.IsNullOrEmpty(systemDrive))
-            {
-                Console.WriteLine("[Error] Could not determine the system drive.");
-                return;
-            }
-
+            Console.WriteLine("Starting whitelist generation (memory-address hashes). This may take a while...");
             try
             {
-                using (StreamWriter writer = new StreamWriter(outputPath))
+                using (StreamWriter writer = new StreamWriter(outputPath, false, Encoding.ASCII))
                 {
-                    Console.WriteLine($"Scanning drive {systemDrive} for PE executables (.exe)...");
-                    ScanDirectoryForPeFiles(systemDrive, writer);
+                    ScanProcessesForMemoryAddresses(writer);
                 }
                 Console.WriteLine($"Whitelist generation complete. File saved to: {outputPath}");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[Error] An unexpected error occurred while generating the whitelist: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Enumerates processes and scans their readable memory regions for PE headers (MZ).
+        /// For each found PE we compute a deterministic address-hash and write it to writer.
+        /// Format written: HEX_HASH (uppercase)
+        /// </summary>
+        private void ScanProcessesForMemoryAddresses(StreamWriter writer)
+        {
+            // Snapshot processes
+            IntPtr snap = CreateToolhelp32Snapshot((uint)SnapshotFlags.Process, 0);
+            if (snap == IntPtr.Zero)
+                return;
+
+            try
+            {
+                PROCESSENTRY32 pe = new();
+                pe.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+
+                if (!Process32First(snap, ref pe))
+                    return;
+
+                do
+                {
+                    uint pid = pe.th32ProcessID;
+                    IntPtr hProcess = IntPtr.Zero;
+                    try
+                    {
+                        // Try to open read/query handle
+                        hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+                        if (hProcess == IntPtr.Zero) continue;
+
+                        // get system bounds & page size
+                        SYSTEM_INFO si = new();
+                        GetSystemInfo(ref si);
+                        ulong minAddress = PtrToULong(si.lpMinimumApplicationAddress);
+                        ulong maxAddress = PtrToULong(si.lpMaximumApplicationAddress);
+                        uint mbiSize = (uint)Marshal.SizeOf(typeof(MEMORY_BASIC_INFORMATION));
+                        ulong pagesize = si.dwPageSize;
+                        int pageInt = (pagesize > int.MaxValue) ? 0x1000 : (int)pagesize;
+                        byte[] pageBuf = new byte[pageInt];
+
+                        ulong current = minAddress;
+                        MEMORY_BASIC_INFORMATION mbi;
+
+                        while (current < maxAddress && VirtualQueryEx(hProcess, AddrToIntPtr(current), out mbi, mbiSize) != 0)
+                        {
+                            bool isReadable = (mbi.State == MEM_COMMIT) && ((mbi.Protect & PAGE_GUARD) == 0) && ((mbi.Protect & PAGE_NOACCESS) == 0);
+                            if (isReadable)
+                            {
+                                ulong regionBase = PtrToULong(mbi.BaseAddress);
+                                ulong regionSize = PtrToULong(mbi.RegionSize);
+                                ulong regionEnd = regionBase + regionSize;
+
+                                for (ulong addr = regionBase; addr < regionEnd; addr += pagesize)
+                                {
+                                    // read one page
+                                    if (!ReadProcessMemoryW(hProcess, addr, pageBuf, out uint bytesRead) || bytesRead < 2)
+                                        continue;
+
+                                    int safeBytes = (int)Math.Min(bytesRead, (uint)pageBuf.Length);
+
+                                    // scan for 'MZ' inside pageBuf
+                                    for (int i = 0; i < safeBytes - 1; i++)
+                                    {
+                                        if (pageBuf[i] == 0x4D && pageBuf[i + 1] == 0x5A) // 'M' 'Z'
+                                        {
+                                            // compute the absolute VA of signature
+                                            ulong foundVA = addr + (ulong)i;
+
+                                            // Compute deterministic hash from pid + foundVA
+                                            string h = ComputeAddressHash(pid, foundVA);
+                                            if (!string.IsNullOrEmpty(h))
+                                            {
+                                                writer.WriteLine(h);
+                                            }
+
+                                            // advance past this signature to avoid duplicate detections in same page
+                                            i += 1;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // advance to next region
+                            current = PtrToULong(mbi.BaseAddress) + PtrToULong(mbi.RegionSize);
+                        }
+                    }
+                    catch
+                    {
+                        // ignore unreadable processes/regions
+                    }
+                    finally
+                    {
+                        if (hProcess != IntPtr.Zero)
+                            CloseHandle(hProcess);
+                    }
+                } while (Process32Next(snap, ref pe));
+            }
+            finally
+            {
+                CloseHandle(snap);
+            }
+        }
+
+        /// <summary>
+        /// Create a deterministic 64-bit-ish hex string from pid + address.
+        /// Uses FNV-1a 64-bit over the ASCII of "PID:ADDRESS" and returns uppercase hex.
+        /// This is fast, deterministic, and small compared to SHA256.
+        /// </summary>
+        private string ComputeAddressHash(uint pid, ulong address)
+        {
+            try
+            {
+                string input = pid.ToString() + ":" + address.ToString("X16"); // stable textual input
+                                                                               // FNV-1a 64-bit
+                const ulong FNV_offset_basis = 14695981039346656037UL;
+                const ulong FNV_prime = 1099511628211UL;
+                ulong hash = FNV_offset_basis;
+                foreach (byte b in Encoding.ASCII.GetBytes(input))
+                {
+                    hash ^= b;
+                    hash *= FNV_prime;
+                }
+                return hash.ToString("X16"); // 16 hex chars (64-bit) uppercase
+            }
+            catch
+            {
+                return null;
             }
         }
 

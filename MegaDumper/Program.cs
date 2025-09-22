@@ -98,7 +98,14 @@ namespace Mega_Dumper
             // A MainForm instance is needed to access the logic methods.
             // We create it but do not run Application.Run() on it.
             var logic = new MainForm();
-            logic.EnableDebuggerPrivileges(); // Essential for process memory access
+            logic.EnableDebuggerPrivileges();
+
+            // auto-load default whitelist if present (so dumps will consult it automatically)
+            string defaultWhitelist = Path.Combine(Directory.GetCurrentDirectory(), "whitelist_hashes.txt");
+            if (File.Exists(defaultWhitelist))
+            {
+                logic.LoadWhitelistFile(defaultWhitelist);
+            }
 
             if (whitelistMode)
             {
@@ -128,7 +135,7 @@ namespace Mega_Dumper
             Console.WriteLine("===========================");
             Console.WriteLine("\nTo dump a process by its PID:");
             Console.WriteLine("  Mega_Dumper.exe --pid <ProcessID> --output <TargetDirectoryPath>");
-            Console.WriteLine("\nTo generate a system-wide whitelist of executable hashes:");
+            Console.WriteLine("\nTo generate a system-wide whitelist of memory-address hashes:");
             Console.WriteLine("  Mega_Dumper.exe --whitelist [OptionalOutputFilePath.txt]");
         }
     }

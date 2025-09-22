@@ -7,18 +7,19 @@
  */
 using ProcessUtils;
 using System;
+using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using WinEnumerator;
-using System.ComponentModel;
-using System.Security.Cryptography;
-using System.Text;
 
 namespace Mega_Dumper
 {
@@ -35,6 +36,48 @@ namespace Mega_Dumper
             UIntPtr nSize,
             out UIntPtr lpNumberOfBytesRead
         );
+
+        // store loaded whitelist in-memory
+        private HashSet<string> _memoryWhitelist = null;
+
+        /// <summary>
+        /// Loads whitelist file into a HashSet for fast lookup. Returns true if loaded.
+        /// </summary>
+        public bool LoadWhitelistFile(string whitelistPath)
+        {
+            try
+            {
+                if (!File.Exists(whitelistPath))
+                {
+                    Console.WriteLine($"[Whitelist] File not found: {whitelistPath}");
+                    return false;
+                }
+
+                var lines = File.ReadLines(whitelistPath)
+                                .Select(l => l.Trim())
+                                .Where(l => l.Length > 0)
+                                .Select(l => l.ToUpperInvariant());
+
+                _memoryWhitelist = new HashSet<string>(lines);
+                Console.WriteLine($"[Whitelist] Loaded {_memoryWhitelist.Count} entries from {whitelistPath}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Whitelist] Failed to load whitelist: {ex.Message}");
+                _memoryWhitelist = null;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Helper to test whether a computed address hash is whitelisted.
+        /// </summary>
+        private bool IsWhitelisted(string addressHash)
+        {
+            if (_memoryWhitelist == null) return false;
+            return _memoryWhitelist.Contains(addressHash?.ToUpperInvariant());
+        }
 
         // This is now the primary wrapper. It's safe for both x86 and x64.
         public static bool ReadProcessMemory(
@@ -304,13 +347,16 @@ namespace Mega_Dumper
         /// <summary>
         /// Enumerates processes and scans their readable memory regions for PE headers (MZ).
         /// For each found PE we compute a deterministic address-hash and write it to writer.
-        /// Format written: HEX_HASH (uppercase)
+        /// Format written: HEX_HASH (uppercase). Duplicates are removed.
         /// </summary>
         private void ScanProcessesForMemoryAddresses(StreamWriter writer)
         {
+            // Keep a global seen set so we don't write duplicates across processes/regions
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             // Snapshot processes
             IntPtr snap = CreateToolhelp32Snapshot((uint)SnapshotFlags.Process, 0);
-            if (snap == IntPtr.Zero)
+            if (snap == IntPtr.Zero || snap == new IntPtr(-1))
                 return;
 
             try
@@ -337,8 +383,8 @@ namespace Mega_Dumper
                         ulong minAddress = PtrToULong(si.lpMinimumApplicationAddress);
                         ulong maxAddress = PtrToULong(si.lpMaximumApplicationAddress);
                         uint mbiSize = (uint)Marshal.SizeOf(typeof(MEMORY_BASIC_INFORMATION));
-                        ulong pagesize = si.dwPageSize;
-                        int pageInt = (pagesize > int.MaxValue) ? 0x1000 : (int)pagesize;
+                        ulong pagesize = si.dwPageSize != 0 ? si.dwPageSize : 0x1000UL;
+                        int pageInt = (pagesize > int.MaxValue || pagesize == 0) ? 0x1000 : (int)pagesize;
                         byte[] pageBuf = new byte[pageInt];
 
                         ulong current = minAddress;
@@ -355,7 +401,10 @@ namespace Mega_Dumper
 
                                 for (ulong addr = regionBase; addr < regionEnd; addr += pagesize)
                                 {
-                                    // read one page
+                                    // read one page (or remaining bytes)
+                                    ulong toRead = Math.Min((ulong)pageBuf.Length, regionEnd - addr);
+                                    if (toRead < 2) continue;
+
                                     if (!ReadProcessMemoryW(hProcess, addr, pageBuf, out uint bytesRead) || bytesRead < 2)
                                         continue;
 
@@ -373,7 +422,13 @@ namespace Mega_Dumper
                                             string h = ComputeAddressHash(pid, foundVA);
                                             if (!string.IsNullOrEmpty(h))
                                             {
-                                                writer.WriteLine(h);
+                                                // write only unique entries
+                                                if (seen.Add(h))
+                                                {
+                                                    writer.WriteLine(h.ToUpperInvariant());
+                                                    // optional console progress; remove if you want silent operation
+                                                    Console.WriteLine($"[Whitelist] Added {h} (pid {pid} va 0x{foundVA:X})");
+                                                }
                                             }
 
                                             // advance past this signature to avoid duplicate detections in same page
@@ -384,12 +439,14 @@ namespace Mega_Dumper
                             }
 
                             // advance to next region
-                            current = PtrToULong(mbi.BaseAddress) + PtrToULong(mbi.RegionSize);
+                            ulong next = PtrToULong(mbi.BaseAddress) + PtrToULong(mbi.RegionSize);
+                            if (next <= current) break; // safety guard
+                            current = next;
                         }
                     }
                     catch
                     {
-                        // ignore unreadable processes/regions
+                        // ignore unreadable processes/regions — continue with next process
                     }
                     finally
                     {

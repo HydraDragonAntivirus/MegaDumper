@@ -17,6 +17,8 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using WinEnumerator;
 using System.ComponentModel;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace Mega_Dumper
 {
@@ -227,6 +229,191 @@ namespace Mega_Dumper
             // TODO: Add constructor code after the InitializeComponent() call.
             //
         }
+
+        #region New CLI Methods
+
+        /// <summary>
+        /// Performs a process dump from the command line, without UI interaction.
+        /// </summary>
+        /// <param name="processId">The ID of the process to dump.</param>
+        /// <param name="outputDirectory">The root directory for the dump files.</param>
+        /// <returns>A string indicating the result of the dump operation.</returns>
+        public async Task<string> DumpProcessByIdCli(uint processId, string outputDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(outputDirectory))
+            {
+                return "Error: Output directory must be provided.";
+            }
+
+            DUMP_DIRECTORIES ddirs = new() { root = outputDirectory };
+            if (!CreateDirectoriesCli(ref ddirs))
+            {
+                return "Error: Could not create or access the output directory. Please check permissions and path.";
+            }
+
+            // The core dumping logic is already in DumpProcessLogic and is UI-agnostic.
+            string result = await Task.Run(() => DumpProcessLogic(processId, ddirs, true /* dumpNative */, true /* restoreFilename */));
+            return result;
+        }
+
+        /// <summary>
+        /// Creates dump directories without showing any UI dialogs. For CLI use.
+        /// </summary>
+        /// <param name="dpmdirs">The struct containing directory paths.</param>
+        /// <returns>True if successful, false otherwise.</returns>
+        public bool CreateDirectoriesCli(ref DUMP_DIRECTORIES dpmdirs)
+        {
+            SetDirectoriesPath(ref dpmdirs);
+            try
+            {
+                Directory.CreateDirectory(dpmdirs.dumps);
+                Directory.CreateDirectory(dpmdirs.nativedirname);
+                Directory.CreateDirectory(dpmdirs.sysdirname);
+                Directory.CreateDirectory(dpmdirs.unknowndirname);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Error] Failed to create directories: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Generates a whitelist file by hashing all PE executables on the system drive.
+        /// </summary>
+        /// <param name="outputPath">The path to save the whitelist file.</param>
+        public void GenerateWhitelist(string outputPath)
+        {
+            Console.WriteLine("Starting whitelist generation. This may take a while...");
+            string systemDrive = Path.GetPathRoot(Environment.SystemDirectory);
+            if (string.IsNullOrEmpty(systemDrive))
+            {
+                Console.WriteLine("[Error] Could not determine the system drive.");
+                return;
+            }
+
+            try
+            {
+                using (StreamWriter writer = new StreamWriter(outputPath))
+                {
+                    Console.WriteLine($"Scanning drive {systemDrive} for PE executables (.exe)...");
+                    ScanDirectoryForPeFiles(systemDrive, writer);
+                }
+                Console.WriteLine($"Whitelist generation complete. File saved to: {outputPath}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Error] An unexpected error occurred while generating the whitelist: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Recursively scans a directory for PE files and writes their hashes to the writer.
+        /// </summary>
+        private void ScanDirectoryForPeFiles(string directoryPath, StreamWriter writer)
+        {
+            try
+            {
+                foreach (string file in Directory.EnumerateFiles(directoryPath, "*.exe"))
+                {
+                    try
+                    {
+                        if (IsPeFile(file))
+                        {
+                            string hash = ComputeSha256Hash(file);
+                            if (!string.IsNullOrEmpty(hash))
+                            {
+                                writer.WriteLine(hash);
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore errors for individual files (e.g., access denied)
+                    }
+                }
+
+                foreach (string directory in Directory.EnumerateDirectories(directoryPath))
+                {
+                    ScanDirectoryForPeFiles(directory, writer);
+                }
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Ignore directories we cannot access
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Warning] Could not scan directory {directoryPath}: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Checks if a file is a valid PE file by reading its headers.
+        /// </summary>
+        private bool IsPeFile(string filePath)
+        {
+            try
+            {
+                using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    if (fs.Length < 0x40) return false;
+                    using (BinaryReader reader = new BinaryReader(fs))
+                    {
+                        // Check for 'MZ' signature at the beginning
+                        if (reader.ReadUInt16() != 0x5A4D) return false;
+
+                        // Seek to the PE Header offset field
+                        fs.Seek(0x3C, SeekOrigin.Begin);
+                        uint peHeaderOffset = reader.ReadUInt32();
+
+                        if (fs.Length < peHeaderOffset + 4) return false;
+
+                        // Seek to the PE Header and check for 'PE\0\0' signature
+                        fs.Seek(peHeaderOffset, SeekOrigin.Begin);
+                        if (reader.ReadUInt32() != 0x00004550) return false;
+
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+                // File could be locked, unreadable, or cause other errors
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Computes the SHA256 hash of a file.
+        /// </summary>
+        private string ComputeSha256Hash(string filePath)
+        {
+            try
+            {
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    using (FileStream fileStream = File.OpenRead(filePath))
+                    {
+                        byte[] hash = sha256.ComputeHash(fileStream);
+                        var sb = new StringBuilder(hash.Length * 2);
+                        foreach (byte b in hash)
+                        {
+                            sb.Append(b.ToString("x2"));
+                        }
+                        return sb.ToString();
+                    }
+                }
+            }
+            catch
+            {
+                // Handle file access errors
+                return null;
+            }
+        }
+
+        #endregion
 
         private void Button1Click(object sender, EventArgs e)
         {

@@ -1529,12 +1529,14 @@ namespace Mega_Dumper
 
                 while (currentAddress < maxaddress && VirtualQueryEx(hProcess, AddrToIntPtr(currentAddress), out mbi, mbiSize) != 0)
                 {
-                    // We are interested in committed memory that is not guarded and is accessible
-                    // FIX: Changed the check for page protection to correctly use bitwise AND operators.
-                    // The original check `(mbi.Protect != PAGE_NOACCESS)` could fail if other flags were
-                    // combined with PAGE_NOACCESS, leading to an attempt to read an invalid memory page
-                    // and causing a crash in the target process.
-                    bool isMemoryReadable = (mbi.State == MEM_COMMIT) && ((mbi.Protect & PAGE_GUARD) == 0) && ((mbi.Protect & PAGE_NOACCESS) == 0);
+                    // =================== FIX START ===================
+                    // We are interested in committed memory that is not guarded and is accessible.
+                    // The original check was flawed because it didn't use bitwise operations,
+                    // which could lead to reading invalid memory and causing the access violation.
+                    bool isMemoryReadable = (mbi.State == MEM_COMMIT) &&
+                                            ((mbi.Protect & PAGE_GUARD) == 0) &&
+                                            ((mbi.Protect & PAGE_NOACCESS) == 0);
+                    // =================== FIX END =====================
 
                     if (isMemoryReadable)
                     {
@@ -1598,7 +1600,7 @@ namespace Mega_Dumper
                                                 else
                                                 {
                                                     // fallback: read 4 bytes from remote process at (j + k + 0x3C)
-                                                    if (!ReadProcessMemoryW(hProcess, j + (ulong)k + 0x3CUL, infokeep, (UIntPtr)4, out BytesRead))
+                                                    if (!ReadProcessMemoryW(hProcess, j + (ulong)k + 0x03CUL, infokeep, (UIntPtr)4, out BytesRead))
                                                         continue;
                                                     e_lfanew = BitConverter.ToInt32(infokeep, 0);
                                                 }

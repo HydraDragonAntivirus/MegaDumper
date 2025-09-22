@@ -297,8 +297,11 @@ namespace Mega_Dumper
                             string rname = "";
                             try
                             {
-                                // Check if theProc is not null before using it
-                                if (theProc != null)
+                                // =================== FIX START ===================
+                                // Check if theProc and its MainModule are not null before using them.
+                                // This prevents a NullReferenceException for processes where the
+                                // main module cannot be accessed (e.g., system processes, access denied).
+                                if (theProc != null && theProc.MainModule != null)
                                 {
                                     rname = theProc.MainModule.FileName.Replace("\\??\\", "");
                                     if (File.Exists(rname))
@@ -306,9 +309,12 @@ namespace Mega_Dumper
                                         directoryName = Path.GetDirectoryName(rname);
                                     }
                                 }
+                                // =================== FIX END =====================
                             }
                             catch
                             {
+                                // Catch exceptions that can occur when accessing MainModule,
+                                // for example, Win32Exception for access denied.
                             }
 
                             // Close the process handle if it was successfully opened
@@ -425,7 +431,7 @@ namespace Mega_Dumper
                         isThere = true;
                 }
 
-                if (!isThere && lvprocesslist.Items[i].SubItems[2].Text != "Killed")
+                if (!isThere && lvprocesslist.Items.Count > i && lvprocesslist.Items[i].SubItems.Count > 2 && lvprocesslist.Items[i].SubItems[2].Text != "Killed")
                 {
                     lvprocesslist.Items[i].SubItems[2].Text = "Killed";
                 }
@@ -899,17 +905,24 @@ namespace Mega_Dumper
                         string rname = "";
                         try
                         {
-                            rname = theProc.MainModule.FileName.Replace("\\??\\", "");
-                            if (File.Exists(rname))
+                            if (theProc != null && theProc.MainModule != null)
                             {
-                                directoryName = Path.GetDirectoryName(rname);
+                                rname = theProc.MainModule.FileName.Replace("\\??\\", "");
+                                if (File.Exists(rname))
+                                {
+                                    directoryName = Path.GetDirectoryName(rname);
+                                }
                             }
                         }
                         catch
                         {
                         }
 
-                        theProc.Close();
+                        if (theProc != null)
+                        {
+                            theProc.Close();
+                        }
+
 
                         if (!File.Exists(rname) && Environment.OSVersion.Platform == PlatformID.Win32NT)
                         {

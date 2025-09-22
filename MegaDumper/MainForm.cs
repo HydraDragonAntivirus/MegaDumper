@@ -759,32 +759,67 @@ namespace Mega_Dumper
         {
             try
             {
-                using (Process process = Process.GetProcessById(processId))
+                Process process;
+                try
                 {
-                    if (process != null)
-                    {
-                        // All Windows processes are PE processes
-                        try
-                        {
-                            string fileName = process.MainModule.FileName.ToLower();
-                            if (fileName.EndsWith(".exe") || fileName.EndsWith(".dll"))
-                                return true;
-                        }
-                        catch
-                        {
-                            // MainModule access denied, but it's still likely a PE process
-                        }
+                    process = Process.GetProcessById(processId);
+                }
+                catch (ArgumentException)
+                {
+                    // Invalid pid
+                    return false;
+                }
+                catch
+                {
+                    // Can't get the process -> treat as not PE
+                    return false;
+                }
 
-                        // If we can access the process, it's likely a PE process
-                        return true;
-                    }
+                if (process == null)
+                    return false;
+
+                try
+                {
+                    // If the process has exited, it's not a running PE process.
+                    if (process.HasExited)
+                        return false;
+                }
+                catch
+                {
+                    // If we can't determine exited state, fall through and assume it's a PE process.
+                }
+
+                try
+                {
+                    // Accessing Handle is cheap compared to Modules/MainModule and typically doesn't hang.
+                    var h = process.Handle;
+                    if (h == IntPtr.Zero)
+                        return false;
+
+                    // We explicitly DO NOT touch process.MainModule or process.Modules here.
+                    // If we can open a handle to the process, assume it's a PE process (per your permission to assume).
+                    return true;
+                }
+                catch (Win32Exception)
+                {
+                    // Access denied or architecture mismatch — you allowed to assume in this case.
+                    return true;
+                }
+                catch (InvalidOperationException)
+                {
+                    // Process exited between calls
+                    return false;
+                }
+                catch
+                {
+                    // Any other unexpected failure -> be conservative and assume false.
+                    return false;
                 }
             }
             catch
             {
                 return false;
             }
-            return false;
         }
 
         private bool SafePEMemoryCheck(int processId)
@@ -1495,7 +1530,11 @@ namespace Mega_Dumper
                 while (currentAddress < maxaddress && VirtualQueryEx(hProcess, AddrToIntPtr(currentAddress), out mbi, mbiSize) != 0)
                 {
                     // We are interested in committed memory that is not guarded and is accessible
-                    bool isMemoryReadable = (mbi.State == MEM_COMMIT) && (mbi.Protect & PAGE_GUARD) == 0 && (mbi.Protect != PAGE_NOACCESS);
+                    // FIX: Changed the check for page protection to correctly use bitwise AND operators.
+                    // The original check `(mbi.Protect != PAGE_NOACCESS)` could fail if other flags were
+                    // combined with PAGE_NOACCESS, leading to an attempt to read an invalid memory page
+                    // and causing a crash in the target process.
+                    bool isMemoryReadable = (mbi.State == MEM_COMMIT) && ((mbi.Protect & PAGE_GUARD) == 0) && ((mbi.Protect & PAGE_NOACCESS) == 0);
 
                     if (isMemoryReadable)
                     {
@@ -1545,12 +1584,90 @@ namespace Mega_Dumper
                                                 continue;
 
                                             // check 'PE' signature
-                                            if (onepage[checkIndex] == 0x50 && onepage[checkIndex + 1] == 0x45)
+                                            if (onepage[checkIndex] == 0x50 && onepage[checkIndex + 1] == 0x45) // 'P' 'E'
                                             {
                                                 bool isNetAssembly = false;
+
+                                                // --- SAFELY obtain e_lfanew (PE header offset) ---
+                                                int e_lfanew = -1;
+                                                // try read from local buffer if available
+                                                if (k + 0x3C + 4 <= safeByteCount)
+                                                {
+                                                    e_lfanew = BitConverter.ToInt32(onepage, k + 0x3C);
+                                                }
+                                                else
+                                                {
+                                                    // fallback: read 4 bytes from remote process at (j + k + 0x3C)
+                                                    if (!ReadProcessMemoryW(hProcess, j + (ulong)k + 0x3CUL, infokeep, (UIntPtr)4, out BytesRead))
+                                                        continue;
+                                                    e_lfanew = BitConverter.ToInt32(infokeep, 0);
+                                                }
+
+                                                if (e_lfanew <= 0)
+                                                    continue;
+
+                                                // compute local index of PE signature relative to onepage
+                                                long peSigLocalIndex = (long)k + e_lfanew;
+
+                                                // verify 'PE\0\0' either in local buffer or by remote read
+                                                bool peSigOk = false;
+                                                if (peSigLocalIndex >= 0 && (peSigLocalIndex + 4) <= safeByteCount)
+                                                {
+                                                    // signature is inside current local buffer
+                                                    if (onepage[peSigLocalIndex] == 0x50 && onepage[peSigLocalIndex + 1] == 0x45
+                                                        && onepage[peSigLocalIndex + 2] == 0x00 && onepage[peSigLocalIndex + 3] == 0x00)
+                                                        peSigOk = true;
+                                                }
+                                                else
+                                                {
+                                                    // signature not fully in local page: read 4 bytes from remote to confirm
+                                                    if (ReadProcessMemoryW(hProcess, j + (ulong)k + (ulong)e_lfanew, infokeep, (UIntPtr)4, out BytesRead))
+                                                    {
+                                                        if (BytesRead == 4 && infokeep[0] == 0x50 && infokeep[1] == 0x45 && infokeep[2] == 0x00 && infokeep[3] == 0x00)
+                                                            peSigOk = true;
+                                                    }
+                                                }
+
+                                                if (!peSigOk)
+                                                    continue;
+
+                                                // --- SAFELY read NumberOfSections and SizeOfOptionalHeader ---
+                                                int numberOfSections = 0;
+                                                short sizeOfOptionalHeader = 0;
+
+                                                // NumberOfSections is at offset +6 from PE signature (i.e. e_lfanew + 6)
+                                                if (peSigLocalIndex >= 0 && (peSigLocalIndex + 8) <= safeByteCount)
+                                                {
+                                                    numberOfSections = BitConverter.ToInt16(onepage, (int)peSigLocalIndex + 6);
+                                                }
+                                                else
+                                                {
+                                                    if (!ReadProcessMemoryW(hProcess, j + (ulong)k + (ulong)e_lfanew + 6UL, infokeep, (UIntPtr)2, out BytesRead))
+                                                        continue;
+                                                    numberOfSections = BitConverter.ToInt16(infokeep, 0);
+                                                }
+
+                                                // SizeOfOptionalHeader is at offset 20 from PE signature (e_lfanew + 20)
+                                                if (peSigLocalIndex >= 0 && (peSigLocalIndex + 22) <= safeByteCount)
+                                                {
+                                                    sizeOfOptionalHeader = BitConverter.ToInt16(onepage, (int)peSigLocalIndex + 20);
+                                                }
+                                                else
+                                                {
+                                                    if (!ReadProcessMemoryW(hProcess, j + (ulong)k + (ulong)e_lfanew + 20UL, infokeep, (UIntPtr)2, out BytesRead))
+                                                        continue;
+                                                    sizeOfOptionalHeader = BitConverter.ToInt16(infokeep, 0);
+                                                }
+
+                                                // sanity checks
+                                                if (numberOfSections <= 0 || numberOfSections >= 100)
+                                                    continue;
+
+                                                // Now call CheckAdvancedPEStructure with the correct PE header offset
                                                 try
                                                 {
-                                                    isNetAssembly = CheckAdvancedPEStructure(hProcess, (j + (ulong)k), PEOffset);
+                                                    // pass the image base and e_lfanew so the checker knows where the header lives
+                                                    isNetAssembly = CheckAdvancedPEStructure(hProcess, (j + (ulong)k), e_lfanew);
                                                 }
                                                 catch (System.ComponentModel.Win32Exception)
                                                 {
@@ -1574,12 +1691,19 @@ namespace Mega_Dumper
 
                                                 if (dumpNative || NetMetadata != 0)
                                                 {
-                                                    // read PE header into buffer (use pagesizeInt)
-                                                    byte[] PeHeader = new byte[pagesizeInt];
-                                                    if (!ReadProcessMemoryW(hProcess, j + (ulong)k, PeHeader, (UIntPtr)pagesizeInt, out BytesRead))
+                                                    // Read entire PE header from memory in one operation to ensure consistency
+                                                    int peHeaderSize = Math.Max(pagesizeInt, PEOffset + 0x400); // Ensure we read enough data
+                                                    byte[] PeHeader = new byte[peHeaderSize];
+                                                    if (!ReadProcessMemoryW(hProcess, j + (ulong)k, PeHeader, (UIntPtr)peHeaderSize, out BytesRead))
                                                         continue;
 
+                                                    // Verify we have enough data
+                                                    if (BytesRead < PEOffset + 0x100) continue;
+
                                                     int nrofsection = BitConverter.ToInt16(PeHeader, PEOffset + 0x06);
+
+                                                    // Debug: Log the section count for troubleshooting
+                                                    System.Diagnostics.Debug.WriteLine($"Found PE at {(j + (ulong)k):X8}, Sections: {nrofsection}");
                                                     if (nrofsection > 0 && nrofsection < 100) // Sanity check for number of sections
                                                     {
                                                         bool isNetFile = true;
@@ -1587,9 +1711,19 @@ namespace Mega_Dumper
                                                         if (NetMetadata == 0)
                                                             isNetFile = false;
 
-                                                        int sectionalignment = BitConverter.ToInt32(PeHeader, PEOffset + 0x038);
-                                                        int filealignment = BitConverter.ToInt32(PeHeader, PEOffset + 0x03C);
-                                                        short sizeofoptionalheader = BitConverter.ToInt16(PeHeader, PEOffset + 0x014);
+                                                        // Read section alignment values directly from memory to ensure accuracy
+                                                        byte[] alignmentBytes = new byte[8];
+                                                        if (!ReadProcessMemoryW(hProcess, j + (ulong)k + (ulong)PEOffset + 0x038, alignmentBytes, (UIntPtr)8, out BytesRead))
+                                                            continue;
+
+                                                        int sectionalignment = BitConverter.ToInt32(alignmentBytes, 0);
+                                                        int filealignment = BitConverter.ToInt32(alignmentBytes, 4);
+                                                        // Read SizeOfOptionalHeader directly from memory
+                                                        byte[] optHeaderSizeBytes = new byte[2];
+                                                        if (!ReadProcessMemoryW(hProcess, j + (ulong)k + (ulong)PEOffset + 0x014, optHeaderSizeBytes, (UIntPtr)2, out BytesRead))
+                                                            continue;
+
+                                                        short sizeofoptionalheader = BitConverter.ToInt16(optHeaderSizeBytes, 0);
 
                                                         bool IsDll = false;
                                                         if ((PeHeader[PEOffset + 0x017] & 32) != 0) IsDll = true;

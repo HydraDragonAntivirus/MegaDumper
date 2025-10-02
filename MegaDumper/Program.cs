@@ -96,11 +96,10 @@ namespace Mega_Dumper
             }
 
             // A MainForm instance is needed to access the logic methods.
-            // We create it but do not run Application.Run() on it.
             var logic = new MainForm();
             logic.EnableDebuggerPrivileges();
 
-            // auto-load default whitelist if present (so dumps will consult it automatically)
+            // auto-load default whitelist if present
             string defaultWhitelist = Path.Combine(Directory.GetCurrentDirectory(), "whitelist_hashes.txt");
             if (File.Exists(defaultWhitelist))
             {
@@ -111,7 +110,7 @@ namespace Mega_Dumper
             {
                 logic.GenerateWhitelist(whitelistPath);
             }
-            else if (pid > 0 && outputPath != null)
+            else if (pid > 0 && !string.IsNullOrEmpty(outputPath))  // CHANGED: Added null/empty check
             {
                 Console.WriteLine($"Attempting to dump process with PID: {pid} into directory: '{outputPath}'...");
                 string result = await logic.DumpProcessByIdCli(pid, outputPath);
@@ -119,7 +118,7 @@ namespace Mega_Dumper
             }
             else
             {
-                // If arguments are provided but don't match the required combinations
+                // If arguments don't match required combinations
                 Console.WriteLine("Error: Invalid argument combination.");
                 PrintUsage();
             }

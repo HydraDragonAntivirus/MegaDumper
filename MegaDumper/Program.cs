@@ -1,142 +1,241 @@
 ﻿/*
- * Created by SharpDevelop.
- * User: Bogdan
- * Date: 11.10.2010
- * Time: 15:47
- * * To change this template use Tools | Options | Coding | Edit Standard Headers.
+ * Rewritten Program.cs
+ * Hybrid GUI + CLI entry point for Mega_Dumper
+ * - Supports GUI when run without arguments
+ * - Supports CLI when run with arguments
+ * - Allocates a console automatically when needed (so this file can be used in a Windows Application build)
+ * - Better argument parsing, exit codes, and optional pause-for-read (--wait)
  */
+
 using System;
-using System.Windows.Forms;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using System.Windows.Forms;
 
 namespace Mega_Dumper
 {
-    /// <summary>
-    /// Class with program entry point.
-    /// </summary>
-    internal sealed class Program
+    internal static class Program
     {
+        // If the project is compiled as a "Windows Application", there is no console by default.
+        // These kernel32 calls let us allocate a console at runtime so Console.WriteLine works.
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AllocConsole();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool FreeConsole();
+
         /// <summary>
-        /// Program entry point. Handles GUI or CLI mode based on arguments.
+        /// Single entry point. Runs GUI when no arguments are present, otherwise runs CLI mode.
+        /// Keep this method synchronous and STA so WinForms/WPF behavior remains correct.
         /// </summary>
         [STAThread]
-        private static void Main(string[] args)
+        private static int Main(string[] args)
         {
-            if (args.Length == 0)
+            // No args -> normal GUI mode
+            if (args == null || args.Length == 0)
             {
-                // No arguments, run in standard GUI mode.
                 Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
                 Application.Run(new MainForm());
+                return 0;
             }
-            else
+
+            // We have CLI args: ensure a console is present (useful when built as Windows Application)
+            if (!AllocConsole())
             {
-                // Arguments detected, run in CLI mode.
-                RunCli(args).GetAwaiter().GetResult();
+                // If AllocConsole fails, we still attempt to run; Console calls will no-op.
+                // We don't exit here because sometimes AllocConsole fails when launched from an existing console.
+            }
+
+            try
+            {
+                int exitCode = RunCli(args).GetAwaiter().GetResult();
+                // Optionally free the console — commented out because freeing may close the window immediately.
+                // FreeConsole();
+                return exitCode;
+            }
+            finally
+            {
+                // Leave the console open/attached so users running from Explorer can read output.
+                // If you want the console to go away immediately, uncomment FreeConsole() above.
             }
         }
 
         /// <summary>
-        /// Parses command-line arguments and executes the requested operation.
+        /// Main CLI logic. Returns exit codes: 0=ok, 1=error, 2=bad usage
         /// </summary>
-        private static async Task RunCli(string[] args)
+        private static async Task<int> RunCli(string[] args)
         {
-            uint pid = 0;
-            string outputPath = null;
-            bool whitelistMode = false;
-            string whitelistPath = "whitelist_hashes.txt"; // Default filename for the whitelist
-
-            // Simple argument parsing logic
-            for (int i = 0; i < args.Length; i++)
+            try
             {
-                switch (args[i].ToLowerInvariant())
+                // Parsed options
+                uint pid = 0;
+                string outputPath = null;
+                bool whitelistMode = false;
+                string whitelistPath = "whitelist_hashes.txt"; // default
+                bool waitForKey = false; // --wait to pause at the end so user can read messages
+
+                // Simple parsing loop
+                for (int i = 0; i < args.Length; i++)
                 {
-                    case "--pid":
-                        if (i + 1 < args.Length && uint.TryParse(args[i + 1], out pid))
-                        {
-                            i++; // Consume the value
-                        }
-                        else
-                        {
-                            Console.WriteLine("Error: --pid requires a valid integer process ID.");
+                    var token = args[i];
+                    switch (token.ToLowerInvariant())
+                    {
+                        case "--help":
+                        case "-h":
+                        case "/?":
                             PrintUsage();
-                            return;
-                        }
-                        break;
+                            return 0;
 
-                    case "--output":
-                        if (i + 1 < args.Length)
-                        {
-                            outputPath = args[i + 1];
-                            i++; // Consume the value
-                        }
-                        else
-                        {
-                            Console.WriteLine("Error: --output requires a file path.");
+                        case "--pid":
+                            if (i + 1 < args.Length && uint.TryParse(args[++i], out pid))
+                            {
+                                // parsed
+                            }
+                            else
+                            {
+                                Console.Error.WriteLine("Error: --pid requires a valid integer process ID.");
+                                PrintUsage();
+                                return 2;
+                            }
+                            break;
+
+                        case "--output":
+                            if (i + 1 < args.Length)
+                            {
+                                outputPath = args[++i];
+                            }
+                            else
+                            {
+                                Console.Error.WriteLine("Error: --output requires a target directory path.");
+                                PrintUsage();
+                                return 2;
+                            }
+                            break;
+
+                        case "--whitelist":
+                            whitelistMode = true;
+                            // optionally the next token is the path
+                            if (i + 1 < args.Length && !args[i + 1].StartsWith("--"))
+                            {
+                                whitelistPath = args[++i];
+                            }
+                            break;
+
+                        case "--wait":
+                            waitForKey = true;
+                            break;
+
+                        default:
+                            Console.Error.WriteLine($"Error: Unknown argument '{token}'");
                             PrintUsage();
-                            return;
-                        }
-                        break;
-
-                    case "--whitelist":
-                        whitelistMode = true;
-                        // Allow optionally specifying the output path for the whitelist
-                        if (i + 1 < args.Length && !args[i + 1].StartsWith("--"))
-                        {
-                            whitelistPath = args[i + 1];
-                            i++;
-                        }
-                        break;
-
-                    default:
-                        Console.WriteLine($"Error: Unknown or invalid argument '{args[i]}'");
-                        PrintUsage();
-                        return;
+                            return 2;
+                    }
                 }
-            }
 
-            // A MainForm instance is needed to access the logic methods.
-            // We create it but do not run Application.Run() on it.
-            var logic = new MainForm();
-            logic.EnableDebuggerPrivileges();
+                // Reuse existing logic on MainForm (keeps changes minimal). If you prefer, extract logic into a separate class.
+                var logic = new MainForm();
+                logic.EnableDebuggerPrivileges();
 
-            // auto-load default whitelist if present (so dumps will consult it automatically)
-            string defaultWhitelist = Path.Combine(Directory.GetCurrentDirectory(), "whitelist_hashes.txt");
-            if (File.Exists(defaultWhitelist))
-            {
-                logic.LoadWhitelistFile(defaultWhitelist);
-            }
+                // Auto-load default whitelist from current directory if present
+                string defaultWhitelist = Path.Combine(Directory.GetCurrentDirectory(), "whitelist_hashes.txt");
+                if (File.Exists(defaultWhitelist))
+                {
+                    try
+                    {
+                        logic.LoadWhitelistFile(defaultWhitelist);
+                        Console.WriteLine($"Loaded default whitelist: {defaultWhitelist}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"Failed to load default whitelist: {ex.Message}");
+                    }
+                }
 
-            if (whitelistMode)
-            {
-                logic.GenerateWhitelist(whitelistPath);
-            }
-            else if (pid > 0 && outputPath != null)
-            {
-                Console.WriteLine($"Attempting to dump process with PID: {pid} into directory: '{outputPath}'...");
-                string result = await logic.DumpProcessByIdCli(pid, outputPath);
-                Console.WriteLine($"\nResult: {result}");
-            }
-            else
-            {
-                // If arguments are provided but don't match the required combinations
-                Console.WriteLine("Error: Invalid argument combination.");
+                if (whitelistMode)
+                {
+                    try
+                    {
+                        string fullOut = Path.GetFullPath(whitelistPath);
+                        Console.WriteLine($"Generating whitelist -> {fullOut}");
+                        logic.GenerateWhitelist(fullOut);
+                        Console.WriteLine("Whitelist generation completed.");
+                        if (waitForKey) { Console.WriteLine("Press any key to exit..."); Console.ReadKey(true); }
+                        return 0;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"Whitelist generation failed: {ex}");
+                        if (waitForKey) { Console.WriteLine("Press any key to exit..."); Console.ReadKey(true); }
+                        return 1;
+                    }
+                }
+
+                // Dumping a process: require both pid and output path
+                if (pid > 0 && !string.IsNullOrWhiteSpace(outputPath))
+                {
+                    try
+                    {
+                        string fullOut = Path.GetFullPath(outputPath);
+                        Console.WriteLine($"Attempting to dump process PID={pid} into directory: '{fullOut}'...");
+
+                        // Create directory if it doesn't exist
+                        try
+                        {
+                            Directory.CreateDirectory(fullOut);
+                        }
+                        catch (Exception dirEx)
+                        {
+                            Console.Error.WriteLine($"Failed to create output directory: {dirEx.Message}");
+                            if (waitForKey) { Console.WriteLine("Press any key to exit..."); Console.ReadKey(true); }
+                            return 1;
+                        }
+
+                        string result = await logic.DumpProcessByIdCli(pid, fullOut).ConfigureAwait(false);
+                        Console.WriteLine($"Result: {result}");
+                        if (waitForKey) { Console.WriteLine("Press any key to exit..."); Console.ReadKey(true); }
+                        return 0;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"Dump failed: {ex}");
+                        if (waitForKey) { Console.WriteLine("Press any key to exit..."); Console.ReadKey(true); }
+                        return 1;
+                    }
+                }
+
+                // If we reach here the argument combination was invalid
+                Console.Error.WriteLine("Error: Missing required arguments. Either provide --pid and --output, or use --whitelist.");
                 PrintUsage();
+                if (waitForKey) { Console.WriteLine("Press any key to exit..."); Console.ReadKey(true); }
+                return 2;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Unhandled exception: {ex}");
+                Console.Error.WriteLine("Exiting with error.");
+                return 1;
             }
         }
 
-        /// <summary>
-        /// Prints the command-line usage instructions to the console.
-        /// </summary>
         private static void PrintUsage()
         {
-            Console.WriteLine("\n===========================");
+            Console.WriteLine();
+            Console.WriteLine("===========================");
             Console.WriteLine("  Mega Dumper CLI Usage");
             Console.WriteLine("===========================");
-            Console.WriteLine("\nTo dump a process by its PID:");
-            Console.WriteLine("  Mega_Dumper.exe --pid <ProcessID> --output <TargetDirectoryPath>");
-            Console.WriteLine("\nTo generate a system-wide whitelist of memory-address hashes:");
-            Console.WriteLine("  Mega_Dumper.exe --whitelist [OptionalOutputFilePath.txt]");
+            Console.WriteLine();
+            Console.WriteLine("To dump a process by its PID:");
+            Console.WriteLine("  Mega_Dumper.exe --pid <ProcessID> --output <TargetDirectoryPath> [--wait]");
+            Console.WriteLine();
+            Console.WriteLine("To generate a whitelist of memory-address hashes:");
+            Console.WriteLine("  Mega_Dumper.exe --whitelist [OptionalOutputFilePath.txt] [--wait]");
+            Console.WriteLine();
+            Console.WriteLine("Other options:");
+            Console.WriteLine("  --wait    Pause and wait for a keypress before the program exits (helpful when double-clicking the exe)");
+            Console.WriteLine("  --help    Show this help message");
+            Console.WriteLine();
         }
     }
 }

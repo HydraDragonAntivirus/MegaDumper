@@ -72,8 +72,6 @@ namespace Mega_Dumper
                 // Parsed options
                 uint pid = 0;
                 string outputPath = null;
-                bool whitelistMode = false;
-                string whitelistPath = "whitelist_hashes.txt"; // default
                 bool waitForKey = false; // --wait to pause at the end so user can read messages
 
                 // Simple parsing loop
@@ -114,15 +112,6 @@ namespace Mega_Dumper
                             }
                             break;
 
-                        case "--whitelist":
-                            whitelistMode = true;
-                            // optionally the next token is the path
-                            if (i + 1 < args.Length && !args[i + 1].StartsWith("--"))
-                            {
-                                whitelistPath = args[++i];
-                            }
-                            break;
-
                         case "--wait":
                             waitForKey = true;
                             break;
@@ -137,40 +126,6 @@ namespace Mega_Dumper
                 // Reuse existing logic on MainForm (keeps changes minimal). If you prefer, extract logic into a separate class.
                 var logic = new MainForm();
                 logic.EnableDebuggerPrivileges();
-
-                // Auto-load default whitelist from current directory if present
-                string defaultWhitelist = Path.Combine(Directory.GetCurrentDirectory(), "whitelist_hashes.txt");
-                if (File.Exists(defaultWhitelist))
-                {
-                    try
-                    {
-                        logic.LoadWhitelistFile(defaultWhitelist);
-                        Console.WriteLine($"Loaded default whitelist: {defaultWhitelist}");
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.Error.WriteLine($"Failed to load default whitelist: {ex.Message}");
-                    }
-                }
-
-                if (whitelistMode)
-                {
-                    try
-                    {
-                        string fullOut = Path.GetFullPath(whitelistPath);
-                        Console.WriteLine($"Generating whitelist -> {fullOut}");
-                        logic.GenerateWhitelist(fullOut);
-                        Console.WriteLine("Whitelist generation completed.");
-                        if (waitForKey) { Console.WriteLine("Press any key to exit..."); Console.ReadKey(true); }
-                        return 0;
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.Error.WriteLine($"Whitelist generation failed: {ex}");
-                        if (waitForKey) { Console.WriteLine("Press any key to exit..."); Console.ReadKey(true); }
-                        return 1;
-                    }
-                }
 
                 // Dumping a process: require both pid and output path
                 if (pid > 0 && !string.IsNullOrWhiteSpace(outputPath))
@@ -206,7 +161,7 @@ namespace Mega_Dumper
                 }
 
                 // If we reach here the argument combination was invalid
-                Console.Error.WriteLine("Error: Missing required arguments. Either provide --pid and --output, or use --whitelist.");
+                Console.Error.WriteLine("Error: Missing required arguments. Provide --pid and --output.");
                 PrintUsage();
                 if (waitForKey) { Console.WriteLine("Press any key to exit..."); Console.ReadKey(true); }
                 return 2;
@@ -229,10 +184,7 @@ namespace Mega_Dumper
             Console.WriteLine("To dump a process by its PID:");
             Console.WriteLine("  Mega_Dumper.exe --pid <ProcessID> --output <TargetDirectoryPath> [--wait]");
             Console.WriteLine();
-            Console.WriteLine("To generate a whitelist of memory-address hashes:");
-            Console.WriteLine("  Mega_Dumper.exe --whitelist [OptionalOutputFilePath.txt] [--wait]");
-            Console.WriteLine();
-            Console.WriteLine("Other options:");
+            Console.WriteLine("Options:");
             Console.WriteLine("  --wait    Pause and wait for a keypress before the program exits (helpful when double-clicking the exe)");
             Console.WriteLine("  --help    Show this help message");
             Console.WriteLine();

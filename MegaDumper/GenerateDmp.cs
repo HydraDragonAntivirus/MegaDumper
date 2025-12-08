@@ -79,7 +79,7 @@ namespace Mega_Dumper
         {
             if (File.Exists(dumpfilename))
             {
-                DialogResult result = MessageBox.Show("A file whit same name already exist!\r\n" +
+                DialogResult result = MessageBox.Show("A file with same name already exist!\r\n" +
                 "Do you want to ovewrite the file ?", "Warning", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (result == DialogResult.Yes)
                 {
@@ -114,13 +114,12 @@ namespace Mega_Dumper
 
                     try
                     {
-                        const string a = null;
-                        a.PadLeft(10);
-                    }
-                    catch
-                    {
                         bool opok = MiniDmp.WriteDump((uint)procid, dumpfilename, selDType);
                         label3.Text = opok ? "Dump file saved on " + dumpfilename + "!" : "Error while generating the dump file!";
+                    }
+                    catch (Exception ex)
+                    {
+                        label3.Text = "Error: " + ex.Message;
                     }
                 }
             }

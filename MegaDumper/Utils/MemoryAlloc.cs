@@ -90,7 +90,7 @@ namespace Native.Memory
 
         public void ReadBytes(int offset, byte[] buffer, int startIndex, int length)
         {
-            Pointer = new IntPtr(Pointer.ToInt32() + offset);
+            Pointer = new IntPtr(Pointer.ToInt64() + offset);
             Marshal.Copy(Pointer, buffer, startIndex, length);
         }
 
@@ -126,13 +126,13 @@ namespace Native.Memory
 
         public T ReadStruct<T>(int offset, int index)
         {
-            Pointer = new IntPtr(offset + (Marshal.SizeOf(typeof(T)) * index) + Pointer.ToInt32());
+            Pointer = new IntPtr(offset + (Marshal.SizeOf(typeof(T)) * index) + Pointer.ToInt64());
             return (T)Marshal.PtrToStructure(Pointer, typeof(T));
         }
 
         public T ReadStructOffset<T>(int offset)
         {
-            Pointer = new IntPtr(Pointer.ToInt32() + offset);
+            Pointer = new IntPtr(Pointer.ToInt64() + offset);
             return (T)Marshal.PtrToStructure(Pointer, typeof(T));
         }
 
@@ -160,7 +160,7 @@ namespace Native.Memory
 
         public void WriteBytes(int offset, byte[] b)
         {
-            Pointer = new IntPtr(Pointer.ToInt32() + offset);
+            Pointer = new IntPtr(Pointer.ToInt64() + offset);
             Marshal.Copy(b, 0, Pointer, b.Length);
         }
 
@@ -191,7 +191,7 @@ namespace Native.Memory
 
         public void WriteStruct<T>(int offset, int index, T s)
         {
-            Pointer = new IntPtr(Pointer.ToInt32() + offset + (Marshal.SizeOf(typeof(T)) * index));
+            Pointer = new IntPtr(Pointer.ToInt64() + offset + (Marshal.SizeOf(typeof(T)) * index));
             Marshal.StructureToPtr(s, Pointer, false);
         }
 

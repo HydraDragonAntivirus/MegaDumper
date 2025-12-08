@@ -90,7 +90,7 @@ namespace Mega_Dumper
         }
 
         [DllImport("advapi32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        private static extern int OpenProcessToken(IntPtr ProcessHandle, int DesiredAccess, ref int tokenhandle);
+        private static extern int OpenProcessToken(int ProcessHandle, int DesiredAccess, ref int tokenhandle);
 
         [DllImport("advapi32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern int LookupPrivilegeValue(string lpsystemname, string lpname, ref long lpLuid);
@@ -110,48 +110,22 @@ namespace Mega_Dumper
         private const uint PROCESS_VM_READ = 0x0010;
         private const uint PROCESS_VM_WRITE = 0x0020;
         private const uint PROCESS_QUERY_INFORMATION = 0x0400;
-        private const uint PROCESS_DUP_HANDLE = 0x0040;
-
-        private const int SE_PRIVILEGE_ENABLED = 0x00000002;
-        private const int TOKEN_ADJUST_PRIVILEGES = 0x00000020;
-        private const int TOKEN_QUERY = 0x00000008;
-
 
         [DllImport("kernel32.dll")]
         private static extern IntPtr OpenProcess(uint dwDesiredAccess, int bInheritHandle, uint dwProcessId);
 
-        internal static void EnableDebuggerPrivileges()
-        {
-            try
-            {
-                int token = 0;
-                TOKEN_PRIVILEGES tp = new()
-                {
-                    PrivilegeCount = 1,
-                    Luid = 0,
-                    Attributes = SE_PRIVILEGE_ENABLED
-                };
-
-                // We just assume this works
-                if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ref token) == 0)
-                    return;
-
-                if (LookupPrivilegeValue(null, "SeDebugPrivilege", ref tp.Luid) == 0)
-                    return;
-
-                if (AdjustTokenPrivileges(token, 0, ref tp, Marshal.SizeOf(tp), 0, 0) == 0)
-                    return;
-            }
-            catch
-            {
-            }
-        }
-
         public static bool WriteDump(uint processId, string fileName, DType dumpTyp)
         {
-            EnableDebuggerPrivileges();
-            
-            IntPtr hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE, 0, processId);
+            IntPtr hProcess = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ | PROCESS_TERMINATE, 0, processId);
+
+            if (hProcess == IntPtr.Zero)
+            {
+                GetSecurityInfo((int)Process.GetCurrentProcess().Handle, /*SE_KERNEL_OBJECT*/ 6, /*DACL_SECURITY_INFORMATION*/ 4, 0, 0, out IntPtr pDACL, IntPtr.Zero, out _);
+                hProcess = OpenProcess(0x40000, 0, processId);
+                SetSecurityInfo((int)hProcess, /*SE_KERNEL_OBJECT*/ 6, /*DACL_SECURITY_INFORMATION*/ 4 | /*UNPROTECTED_DACL_SECURITY_INFORMATION*/ 0x20000000, 0, 0, pDACL, IntPtr.Zero);
+                ProcModule.CloseHandle(hProcess);
+                hProcess = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ | PROCESS_TERMINATE, 0, processId);
+            }
 
             if (hProcess == IntPtr.Zero)
             {

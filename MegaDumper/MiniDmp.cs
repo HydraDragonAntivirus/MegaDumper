@@ -140,8 +140,8 @@ namespace Mega_Dumper
                 exp.ExceptioonPointers = Marshal.GetExceptionPointers();
 
                 return MiniDumpWriteDump(
-                  hProcess,
-                  processId,
+                  GetCurrentProcess(),
+                  GetCurrentProcessId(),
                   fs.SafeFileHandle.DangerousGetHandle(),
                   (uint)dumpTyp,
                   ref exp,

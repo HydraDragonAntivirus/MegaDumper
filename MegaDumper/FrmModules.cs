@@ -53,7 +53,7 @@ namespace Mega_Dumper
         private static extern int OpenProcessToken(int ProcessHandle, int DesiredAccess, ref int tokenhandle);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Auto)]
-        private static extern int GetCurrentProcess();
+        private static extern IntPtr GetCurrentProcess();
 
         [DllImport("advapi32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern int LookupPrivilegeValue(string lpsystemname, string lpname, ref long lpLuid);

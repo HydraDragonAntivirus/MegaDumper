@@ -1649,7 +1649,7 @@ namespace Mega_Dumper
 
         public void SetDirectoriesPath(ref DUMP_DIRECTORIES dpmdirs)
         {
-            dpmdirs.dumps = Path.Combine(dpmdirs.root, "Dumps");
+            dpmdirs.dumps = Path.Combine("C:\\", "Dumps");
             dpmdirs.nativedirname = Path.Combine(dpmdirs.dumps, "Native");
             dpmdirs.sysdirname = Path.Combine(dpmdirs.dumps, "System");
             dpmdirs.unknowndirname = Path.Combine(dpmdirs.dumps, "UnknownName");

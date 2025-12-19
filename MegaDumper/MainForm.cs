@@ -2258,6 +2258,55 @@ namespace Mega_Dumper
 
                                                             fout.Write(virtualdump, 0, rightrawsize);
                                                             fout.Close();
+
+                                                            // Scylla Import Reconstruction: Fix IAT for native PE dumps
+                                                            if (!isNetFile && MegaDumper.ScyllaBindings.IsAvailable)
+                                                            {
+                                                                try
+                                                                {
+                                                                    // Calculate entry point address for IAT search
+                                                                    // Use unchecked to prevent overflow with corrupted/protected PE headers
+                                                                    ulong imageBase = j + (ulong)k;
+                                                                    ulong entryPointAddr = imageBase; // Default to image base
+
+                                                                    unchecked
+                                                                    {
+                                                                        int epRva = BitConverter.ToInt32(PeHeader, PEOffset + 0x028);
+                                                                        // Only add epRva if it's a valid positive value
+                                                                        if (epRva > 0 && epRva < sizeofimage)
+                                                                        {
+                                                                            entryPointAddr = imageBase + (uint)epRva;
+                                                                        }
+                                                                    }
+
+                                                                    // Create output filename for fixed dump
+                                                                    string scyFixFilename = System.IO.Path.ChangeExtension(filename, null) + "_scyfix";
+                                                                    scyFixFilename += IsDll ? ".dll" : ".exe";
+
+                                                                    // Perform automatic import reconstruction
+                                                                    var scyResult = MegaDumper.ScyllaBindings.FixImportsAuto(
+                                                                        processId,
+                                                                        imageBase,
+                                                                        entryPointAddr,
+                                                                        filename,
+                                                                        scyFixFilename,
+                                                                        advancedSearch: true,
+                                                                        createNewIat: true);
+
+                                                                    if (scyResult == MegaDumper.ScyllaError.Success)
+                                                                    {
+                                                                        System.Diagnostics.Debug.WriteLine($"Scylla: Fixed imports -> {scyFixFilename}");
+                                                                    }
+                                                                    else
+                                                                    {
+                                                                        System.Diagnostics.Debug.WriteLine($"Scylla: IAT fix failed - {MegaDumper.ScyllaBindings.GetErrorMessage(scyResult)}");
+                                                                    }
+                                                                }
+                                                                catch (Exception scyEx)
+                                                                {
+                                                                    System.Diagnostics.Debug.WriteLine($"Scylla: Exception - {scyEx.Message}");
+                                                                }
+                                                            }
                                                         }
                                                         CurrentCount++;
                                                     }

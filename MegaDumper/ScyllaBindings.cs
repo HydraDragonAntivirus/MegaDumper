@@ -41,6 +41,11 @@ namespace MegaDumper
         public static string ScyllaDllName => IntPtr.Size == 8 ? SCYLLA_DLL_X64 : SCYLLA_DLL_X86;
 
         /// <summary>
+        /// Stores the last error encountered when trying to load Scylla DLL
+        /// </summary>
+        public static string LastLoadError { get; private set; } = string.Empty;
+
+        /// <summary>
         /// Checks if the Scylla DLL is available
         /// </summary>
         public static bool IsAvailable
@@ -49,11 +54,26 @@ namespace MegaDumper
             {
                 try
                 {
+                    LastLoadError = string.Empty;
                     var version = VersionInformation();
                     return !string.IsNullOrEmpty(version);
                 }
-                catch
+                catch (DllNotFoundException ex)
                 {
+                    LastLoadError = $"DLL not found: {ex.Message}";
+                    Console.WriteLine($"[Scylla] {LastLoadError}");
+                    return false;
+                }
+                catch (BadImageFormatException ex)
+                {
+                    LastLoadError = $"Architecture mismatch (x86/x64): {ex.Message}";
+                    Console.WriteLine($"[Scylla] {LastLoadError}");
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    LastLoadError = $"Load error: {ex.GetType().Name} - {ex.Message}";
+                    Console.WriteLine($"[Scylla] {LastLoadError}");
                     return false;
                 }
             }
@@ -183,17 +203,39 @@ namespace MegaDumper
             out ulong iatStart,
             out uint iatSize)
         {
-            UIntPtr outIatStart;
-            uint outIatSize;
+            iatStart = 0;
+            iatSize = 0;
+            
+            try
+            {
+                // Validate parameters before calling native code
+                if (processId == 0 || imageBase == 0)
+                {
+                    return ScyllaError.PidNotFound;
+                }
+                
+                UIntPtr outIatStart;
+                uint outIatSize;
 
-            int result = IntPtr.Size == 8
-                ? ScyllaIatSearch_x64(processId, (UIntPtr)imageBase, out outIatStart, out outIatSize, (UIntPtr)searchStart, advancedSearch)
-                : ScyllaIatSearch_x86(processId, (UIntPtr)imageBase, out outIatStart, out outIatSize, (UIntPtr)searchStart, advancedSearch);
+                int result = IntPtr.Size == 8
+                    ? ScyllaIatSearch_x64(processId, (UIntPtr)imageBase, out outIatStart, out outIatSize, (UIntPtr)searchStart, advancedSearch)
+                    : ScyllaIatSearch_x86(processId, (UIntPtr)imageBase, out outIatStart, out outIatSize, (UIntPtr)searchStart, advancedSearch);
 
-            iatStart = (ulong)outIatStart;
-            iatSize = outIatSize;
+                iatStart = (ulong)outIatStart;
+                iatSize = outIatSize;
 
-            return (ScyllaError)result;
+                return (ScyllaError)result;
+            }
+            catch (AccessViolationException)
+            {
+                Console.WriteLine("[Scylla] AccessViolationException in IatSearch - process may have exited or memory is invalid");
+                return ScyllaError.ProcessOpenFailed;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Scylla] Exception in IatSearch: {ex.Message}");
+                return ScyllaError.IatSearchError;
+            }
         }
 
         /// <summary>
@@ -216,11 +258,35 @@ namespace MegaDumper
             string dumpFilePath,
             string outputFilePath)
         {
-            int result = IntPtr.Size == 8
-                ? ScyllaIatFixAutoW_x64(processId, (UIntPtr)imageBase, (UIntPtr)iatAddress, iatSize, createNewIat, dumpFilePath, outputFilePath)
-                : ScyllaIatFixAutoW_x86(processId, (UIntPtr)imageBase, (UIntPtr)iatAddress, iatSize, createNewIat, dumpFilePath, outputFilePath);
+            try
+            {
+                // Validate parameters
+                if (processId == 0 || imageBase == 0 || iatAddress == 0 || iatSize == 0)
+                {
+                    return ScyllaError.IatNotFound;
+                }
+                
+                if (string.IsNullOrEmpty(dumpFilePath) || string.IsNullOrEmpty(outputFilePath))
+                {
+                    return ScyllaError.IatWriteError;
+                }
+                
+                int result = IntPtr.Size == 8
+                    ? ScyllaIatFixAutoW_x64(processId, (UIntPtr)imageBase, (UIntPtr)iatAddress, iatSize, createNewIat, dumpFilePath, outputFilePath)
+                    : ScyllaIatFixAutoW_x86(processId, (UIntPtr)imageBase, (UIntPtr)iatAddress, iatSize, createNewIat, dumpFilePath, outputFilePath);
 
-            return (ScyllaError)result;
+                return (ScyllaError)result;
+            }
+            catch (AccessViolationException)
+            {
+                Console.WriteLine("[Scylla] AccessViolationException in IatFix - process may have exited or memory is invalid");
+                return ScyllaError.ProcessOpenFailed;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Scylla] Exception in IatFix: {ex.Message}");
+                return ScyllaError.IatWriteError;
+            }
         }
 
         /// <summary>

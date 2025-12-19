@@ -2267,9 +2267,30 @@ namespace Mega_Dumper
                                                             
                                                             if (shouldTryScylla)
                                                             {
-                                                                bool scyllaAvailable = MegaDumper.ScyllaBindings.IsAvailable;
-                                                                Console.WriteLine($"[Scylla] Checking: isNetFile={isNetFile}, IsDll={IsDll}, Available={scyllaAvailable}, File={filename}");
-                                                                System.Diagnostics.Debug.WriteLine($"Scylla: isNetFile={isNetFile}, IsDll={IsDll}, Available={scyllaAvailable}");
+                                                                // First verify the target process is still running
+                                                                bool processStillRunning = false;
+                                                                try
+                                                                {
+                                                                    using (var proc = System.Diagnostics.Process.GetProcessById((int)processId))
+                                                                    {
+                                                                        processStillRunning = !proc.HasExited;
+                                                                    }
+                                                                }
+                                                                catch
+                                                                {
+                                                                    // Process doesn't exist or access denied
+                                                                    processStillRunning = false;
+                                                                }
+                                                                
+                                                                if (!processStillRunning)
+                                                                {
+                                                                    Console.WriteLine("[Scylla] Target process has exited - skipping import reconstruction");
+                                                                }
+                                                                else
+                                                                {
+                                                                    bool scyllaAvailable = MegaDumper.ScyllaBindings.IsAvailable;
+                                                                    Console.WriteLine($"[Scylla] Checking: isNetFile={isNetFile}, IsDll={IsDll}, Available={scyllaAvailable}, File={filename}");
+                                                                    System.Diagnostics.Debug.WriteLine($"Scylla: isNetFile={isNetFile}, IsDll={IsDll}, Available={scyllaAvailable}");
                                                                 
                                                                 if (scyllaAvailable)
                                                                 {
@@ -2325,8 +2346,10 @@ namespace Mega_Dumper
                                                                 }
                                                                 else
                                                                 {
-                                                                    Console.WriteLine("[Scylla] DLL not available - skipping import reconstruction");
+                                                                    string loadError = MegaDumper.ScyllaBindings.LastLoadError;
+                                                                    Console.WriteLine($"[Scylla] DLL not available - {(string.IsNullOrEmpty(loadError) ? "unknown error" : loadError)}");
                                                                 }
+                                                                } // End of processStillRunning else block
                                                             }
                                                         }
                                                         CurrentCount++;

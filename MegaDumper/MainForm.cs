@@ -1362,28 +1362,37 @@ namespace Mega_Dumper
             // Sanity check for number of sections
             if (nrofsection <= 0 || nrofsection > 96) return -1; // Max 96 sections is a common heuristic
 
-            // IMAGE_OPTIONAL_HEADER + IMAGE_FILE_HEADER + Section Table start
-            // Assuming a standard 32-bit PE header structure, 0xF8 is a common offset
-            // to the start of the section table after the PE signature, COFF header, and optional header.
-            // This can vary, but this value is common for 32-bit PEs.
-            int sectionTableStartOffset = PEOffset + 0xF8;
+            // Get SizeOfOptionalHeader to correctly calculate section table offset
+            // This works for both PE32 (32-bit) and PE32+ (64-bit)
+            if (input.Length < PEOffset + 0x14 + 2) return -1;
+            short sizeOfOptionalHeader = BitConverter.ToInt16(input, PEOffset + 0x14);
+            
+            // Section table starts after: PE signature (4) + COFF header (20) + Optional header
+            int sectionTableStartOffset = PEOffset + 4 + 20 + sizeOfOptionalHeader;
 
             for (int i = 0; i < nrofsection; i++)
             {
                 // Each IMAGE_SECTION_HEADER is 0x28 bytes long
                 int sectionHeaderOffset = sectionTableStartOffset + (0x28 * i);
 
-                // Ensure there's enough room for the current section header (28 bytes)
+                // Ensure there's enough room for the current section header (40 bytes)
                 if (input.Length < sectionHeaderOffset + 0x28) return -1;
 
                 // VirtualAddress is at offset 0x0C from section header start (4 bytes)
                 int virtualAddress = BitConverter.ToInt32(input, sectionHeaderOffset + 0x0C);
                 // VirtualSize is at offset 0x08 from section header start (4 bytes)
                 int fvirtualsize = BitConverter.ToInt32(input, sectionHeaderOffset + 0x08);
+                // SizeOfRawData is at offset 0x10 from section header start (4 bytes)
+                int frawsize = BitConverter.ToInt32(input, sectionHeaderOffset + 0x10);
                 // PointerToRawData is at offset 0x14 from section header start (4 bytes)
                 int frawAddress = BitConverter.ToInt32(input, sectionHeaderOffset + 0x14);
 
-                if ((virtualAddress <= rva) && (virtualAddress + fvirtualsize >= rva))
+                // Use the larger of VirtualSize or SizeOfRawData for bounds checking
+                // This handles sections where VirtualSize is 0 (common in Scylla-created sections)
+                int effectiveSize = Math.Max(fvirtualsize, frawsize);
+                if (effectiveSize <= 0) effectiveSize = frawsize > 0 ? frawsize : fvirtualsize;
+
+                if ((virtualAddress <= rva) && (virtualAddress + effectiveSize >= rva))
                     return frawAddress + (rva - virtualAddress);
             }
 
@@ -1422,6 +1431,162 @@ namespace Mega_Dumper
             }
 
             return -1;
+        }
+
+        /// <summary>
+        /// Sanitizes a Scylla-fixed PE file by removing invalid import descriptors.
+        /// This is necessary because Scylla's advanced search can generate garbage imports
+        /// with DLL names like "?.DLL" or containing unprintable characters.
+        /// </summary>
+        /// <param name="filePath">Path to the scyfix file to sanitize</param>
+        /// <returns>True if sanitization was successful or no changes were needed</returns>
+        private bool SanitizeScyfixFile(string filePath)
+        {
+            try
+            {
+                if (!File.Exists(filePath))
+                {
+                    Console.WriteLine($"[Scylla Sanitize] File not found: {filePath}");
+                    return false;
+                }
+
+                byte[] fileData = File.ReadAllBytes(filePath);
+                if (fileData.Length < 0x40)
+                {
+                    Console.WriteLine("[Scylla Sanitize] File too small to be a valid PE");
+                    return false;
+                }
+
+                // Get PE offset
+                int peOffset = BitConverter.ToInt32(fileData, 0x3C);
+                if (peOffset < 0 || peOffset + 0x80 + 8 > fileData.Length)
+                {
+                    Console.WriteLine("[Scylla Sanitize] Invalid PE header offset");
+                    return false;
+                }
+
+                // Check PE signature
+                if (fileData[peOffset] != 'P' || fileData[peOffset + 1] != 'E')
+                {
+                    Console.WriteLine("[Scylla Sanitize] Invalid PE signature");
+                    return false;
+                }
+
+                // Determine if PE32 or PE32+ (64-bit)
+                ushort magic = BitConverter.ToUInt16(fileData, peOffset + 0x18);
+                bool isPE32Plus = magic == 0x20b;
+
+                // Import directory offset differs between PE32 and PE32+
+                int importDirRvaOffset = isPE32Plus ? (peOffset + 0x90) : (peOffset + 0x80);
+
+                if (importDirRvaOffset + 8 > fileData.Length)
+                {
+                    Console.WriteLine("[Scylla Sanitize] Cannot read import directory info");
+                    return false;
+                }
+
+                int importDirRva = BitConverter.ToInt32(fileData, importDirRvaOffset);
+                int importDirSize = BitConverter.ToInt32(fileData, importDirRvaOffset + 4);
+
+                if (importDirRva == 0 || importDirSize == 0)
+                {
+                    Console.WriteLine("[Scylla Sanitize] No import directory found, nothing to sanitize");
+                    return true;
+                }
+
+                // Convert RVA to file offset
+                int importDirOffset = RVA2Offset(fileData, importDirRva);
+                if (importDirOffset < 0 || importDirOffset >= fileData.Length)
+                {
+                    Console.WriteLine($"[Scylla Sanitize] Could not map import directory RVA 0x{importDirRva:X} to file offset");
+                    return false;
+                }
+
+                Console.WriteLine($"[Scylla Sanitize] Scanning import directory at offset 0x{importDirOffset:X}");
+
+                bool modified = false;
+                int removedCount = 0;
+                int current = 0;
+                const int IMPORT_DESCRIPTOR_SIZE = 20; // sizeof(IMAGE_IMPORT_DESCRIPTOR)
+
+                // Parse import descriptors (20 bytes each)
+                while (importDirOffset + current + IMPORT_DESCRIPTOR_SIZE <= fileData.Length)
+                {
+                    // Check if this is a null terminator (all zeros)
+                    int nameRva = BitConverter.ToInt32(fileData, importDirOffset + current + 12);
+                    if (nameRva == 0)
+                    {
+                        // End of import directory
+                        break;
+                    }
+
+                    // Get the DLL name
+                    int nameOffset = RVA2Offset(fileData, nameRva);
+                    bool isInvalid = false;
+                    string dllName = "";
+
+                    if (nameOffset < 0 || nameOffset >= fileData.Length)
+                    {
+                        // Invalid name RVA - mark for removal
+                        isInvalid = true;
+                        Console.WriteLine($"[Scylla Sanitize] Import at 0x{(importDirOffset + current):X}: Invalid name RVA 0x{nameRva:X}");
+                    }
+                    else
+                    {
+                        // Read the DLL name (null-terminated ASCII string)
+                        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+                        int maxLen = Math.Min(260, fileData.Length - nameOffset);
+                        for (int i = 0; i < maxLen; i++)
+                        {
+                            byte b = fileData[nameOffset + i];
+                            if (b == 0) break;
+                            sb.Append((char)b);
+                        }
+                        dllName = sb.ToString();
+
+                        // Check if DLL name is valid
+                        // Invalid if: empty, contains '?', starts with invalid char, or has unprintable chars
+                        if (string.IsNullOrEmpty(dllName) ||
+                            dllName.Contains("?") ||
+                            dllName.Any(c => c < 32 || c > 126) ||
+                            !dllName.ToLower().EndsWith(".dll"))
+                        {
+                            isInvalid = true;
+                            Console.WriteLine($"[Scylla Sanitize] Import at 0x{(importDirOffset + current):X}: Invalid DLL name \"{dllName}\"");
+                        }
+                    }
+
+                    if (isInvalid)
+                    {
+                        // Zero out this import descriptor to remove it
+                        for (int i = 0; i < IMPORT_DESCRIPTOR_SIZE; i++)
+                        {
+                            fileData[importDirOffset + current + i] = 0;
+                        }
+                        modified = true;
+                        removedCount++;
+                    }
+
+                    current += IMPORT_DESCRIPTOR_SIZE;
+                }
+
+                if (modified)
+                {
+                    Console.WriteLine($"[Scylla Sanitize] Removed {removedCount} invalid import(s), writing sanitized file");
+                    System.IO.File.WriteAllBytes(filePath, fileData);
+                }
+                else
+                {
+                    Console.WriteLine("[Scylla Sanitize] No invalid imports found");
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Scylla Sanitize] Exception: {ex.Message}");
+                return false;
+            }
         }
 
         public unsafe struct image_section_header
@@ -2331,6 +2496,9 @@ namespace Mega_Dumper
                                                                         {
                                                                             Console.WriteLine($"[Scylla] SUCCESS: Fixed imports -> {scyFixFilename}");
                                                                             System.Diagnostics.Debug.WriteLine($"Scylla: Fixed imports -> {scyFixFilename}");
+                                                                            
+                                                                            // Sanitize the output file to remove invalid imports (?.DLL etc.)
+                                                                            SanitizeScyfixFile(scyFixFilename);
                                                                         }
                                                                         else
                                                                         {

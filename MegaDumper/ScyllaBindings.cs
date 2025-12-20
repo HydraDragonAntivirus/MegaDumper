@@ -780,6 +780,26 @@ namespace MegaDumper
             }
         }
 
+        public static bool DumpProcessX86(uint processId, ulong imageBase, ulong entryPoint, string outputPath, string inputFilePath = null)
+        {
+            try
+            {
+                if (!IsProcessAccessible(processId)) return false;
+                return ScyllaDumpProcessW_x86((UIntPtr)processId, inputFilePath, (UIntPtr)imageBase, (UIntPtr)entryPoint, outputPath);
+            }
+            catch { return false; }
+        }
+
+        public static bool DumpProcessX64(uint processId, ulong imageBase, ulong entryPoint, string outputPath, string inputFilePath = null)
+        {
+            try
+            {
+                if (!IsProcessAccessible(processId)) return false;
+                return ScyllaDumpProcessW_x64((UIntPtr)processId, inputFilePath, (UIntPtr)imageBase, (UIntPtr)entryPoint, outputPath);
+            }
+            catch { return false; }
+        }
+
         #endregion
     }
 }

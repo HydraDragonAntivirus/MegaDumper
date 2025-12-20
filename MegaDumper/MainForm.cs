@@ -2874,7 +2874,7 @@ namespace Mega_Dumper
                                                     break;
                                                 }
 
-                                                scyResult = MegaDumper.ScyllaBindings.FixImportsAuto(
+                                                scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
                                                     processId,
                                                     imageBase,
                                                     finalEntryPoint,

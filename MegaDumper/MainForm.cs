@@ -2758,15 +2758,7 @@ namespace Mega_Dumper
                                         
                                         bool isHost64 = IntPtr.Size == 8;
                                         
-                                        if (is64 != isHost64)
-                                        {
-                                            string hostArch = isHost64 ? "64-bit" : "32-bit";
-                                            string targetArch = is64 ? "64-bit" : "32-bit";
-                                            
-                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                $"[{DateTime.Now}] Skipping {targetArch} PE {Path.GetFileName(dumpedFile)} - Host is {hostArch}. Architectures must match.\n");
-                                            continue;
-                                        }
+                                        // Mismatch check removed - ScyllaBindings now handles x64 Host -> x86 Target via Scylla.dll (WoW64 support)
 
                                         // OEP DETECTION STRATEGY (Thread Context):
                                         // The most reliable way to find the OEP of a running process is to check where it is currently executing.
@@ -2959,6 +2951,10 @@ namespace Mega_Dumper
                                      try { File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), $"Error processing {Path.GetFileName(dumpedFile)}: {ex.Message}\n"); } catch {}
                                 }
                             }
+                        }
+                        else
+                        {
+                             System.Windows.Forms.MessageBox.Show($"Scylla is NOT Available!\nReason: {MegaDumper.ScyllaBindings.LastLoadError}\n\nCheck if the CORRECT DLL ({(IntPtr.Size == 8 ? "Scylla.dll" : "Scylla_x86.dll")}) is in the folder.", "Scylla Error", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
                         }
                     }
                     catch {}

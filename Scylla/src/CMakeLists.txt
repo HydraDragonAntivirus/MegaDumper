@@ -98,3 +98,10 @@ add_executable(ScyllaExe WIN32
     "main.cpp"
 )
 target_link_libraries(ScyllaExe PRIVATE ScyllaLib)
+
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    message(STATUS "Configuring 32-bit build - Renaming outputs to *_x86")
+    set_target_properties(Scylla PROPERTIES OUTPUT_NAME "Scylla_x86")
+    set_target_properties(ScyllaExe PROPERTIES OUTPUT_NAME "ScyllaExe_x86")
+    set_target_properties(ScyllaLib PROPERTIES OUTPUT_NAME "ScyllaLib_x86")
+endif()

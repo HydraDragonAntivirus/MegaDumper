@@ -9,6 +9,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Runtime.ExceptionServices;
+using System.IO;
 
 namespace MegaDumper
 {
@@ -33,7 +34,7 @@ namespace MegaDumper
     public static class ScyllaBindings
     {
         // DLL name changes based on architecture
-        private const string SCYLLA_DLL_X86 = "Scylla.dll";
+        private const string SCYLLA_DLL_X86 = "Scylla_x86.dll";
         private const string SCYLLA_DLL_X64 = "Scylla.dll";
 
         /// <summary>
@@ -47,7 +48,7 @@ namespace MegaDumper
         public static string LastLoadError { get; private set; } = string.Empty;
 
         /// <summary>
-        /// Checks if the Scylla DLL is available
+        /// Checks if the Scylla DLL is available (checks both x64 and x86)
         /// </summary>
         public static bool IsAvailable
         {
@@ -79,16 +80,34 @@ namespace MegaDumper
                 }
             }
         }
+        
+        /// <summary>
+        /// Checks if the 32-bit Scylla DLL is available
+        /// </summary>
+        public static bool IsX86Available
+        {
+            get
+            {
+                try
+                {
+                    var version = VersionInformationX86();
+                    return !string.IsNullOrEmpty(version);
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
 
         #region Native Imports
 
-        // Import based on architecture - we use the x64 DLL name and let the loader find it
-        // For x86 builds, the Scylla.dll will be used
-        
+        // x64 DLL imports (Scylla.dll - 64-bit)
         [DllImport("Scylla.dll", EntryPoint = "ScyllaVersionInformationW", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
         private static extern IntPtr ScyllaVersionInformationW_x64();
 
-        [DllImport("Scylla.dll", EntryPoint = "ScyllaVersionInformationW", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
+        // x86 DLL imports (Scylla_x86.dll - 32-bit)
+        [DllImport("Scylla_x86.dll", EntryPoint = "ScyllaVersionInformationW", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
         private static extern IntPtr ScyllaVersionInformationW_x86();
 
         [DllImport("Scylla.dll", EntryPoint = "ScyllaIatSearch", CallingConvention = CallingConvention.StdCall)]
@@ -100,7 +119,7 @@ namespace MegaDumper
             UIntPtr searchStart,
             [MarshalAs(UnmanagedType.Bool)] bool advancedSearch);
 
-        [DllImport("Scylla.dll", EntryPoint = "ScyllaIatSearch", CallingConvention = CallingConvention.StdCall)]
+        [DllImport("Scylla_x86.dll", EntryPoint = "ScyllaIatSearch", CallingConvention = CallingConvention.StdCall)]
         private static extern int ScyllaIatSearch_x86(
             uint dwProcessId,
             UIntPtr imagebase,
@@ -119,7 +138,7 @@ namespace MegaDumper
             [MarshalAs(UnmanagedType.LPWStr)] string dumpFile,
             [MarshalAs(UnmanagedType.LPWStr)] string iatFixFile);
 
-        [DllImport("Scylla.dll", EntryPoint = "ScyllaIatFixAutoW", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
+        [DllImport("Scylla_x86.dll", EntryPoint = "ScyllaIatFixAutoW", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
         private static extern int ScyllaIatFixAutoW_x86(
             uint dwProcessId,
             UIntPtr imagebase,
@@ -137,7 +156,7 @@ namespace MegaDumper
             [MarshalAs(UnmanagedType.Bool)] bool updatePeHeaderChecksum,
             [MarshalAs(UnmanagedType.Bool)] bool createBackup);
 
-        [DllImport("Scylla.dll", EntryPoint = "ScyllaRebuildFileW", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
+        [DllImport("Scylla_x86.dll", EntryPoint = "ScyllaRebuildFileW", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool ScyllaRebuildFileW_x86(
             [MarshalAs(UnmanagedType.LPWStr)] string fileToRebuild,
@@ -154,7 +173,7 @@ namespace MegaDumper
             UIntPtr entrypoint,
             [MarshalAs(UnmanagedType.LPWStr)] string fileResult);
 
-        [DllImport("Scylla.dll", EntryPoint = "ScyllaDumpProcessW", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
+        [DllImport("Scylla_x86.dll", EntryPoint = "ScyllaDumpProcessW", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool ScyllaDumpProcessW_x86(
             UIntPtr pid,
@@ -185,6 +204,40 @@ namespace MegaDumper
                 return string.Empty;
             }
         }
+        
+        /// <summary>
+        /// Gets x86 Scylla version information string specifically
+        /// </summary>
+        /// <returns>Version string like "Scylla x86 v0.9.8"</returns>
+        public static string VersionInformationX86()
+        {
+            try
+            {
+                IntPtr ptr = ScyllaVersionInformationW_x86();
+                return ptr != IntPtr.Zero ? Marshal.PtrToStringUni(ptr) : string.Empty;
+            }
+            catch (DllNotFoundException)
+            {
+                return string.Empty;
+            }
+        }
+        
+        /// <summary>
+        /// Gets x64 Scylla version information string specifically
+        /// </summary>
+        /// <returns>Version string like "Scylla x64 v0.9.8"</returns>
+        public static string VersionInformationX64()
+        {
+            try
+            {
+                IntPtr ptr = ScyllaVersionInformationW_x64();
+                return ptr != IntPtr.Zero ? Marshal.PtrToStringUni(ptr) : string.Empty;
+            }
+            catch (DllNotFoundException)
+            {
+                return string.Empty;
+            }
+        }
 
         /// <summary>
         /// Searches for the Import Address Table in a process
@@ -196,7 +249,6 @@ namespace MegaDumper
         /// <param name="iatStart">Output: Start address of found IAT</param>
         /// <param name="iatSize">Output: Size of found IAT in bytes</param>
         /// <returns>ScyllaError result code</returns>
-        [HandleProcessCorruptedStateExceptions]
         public static ScyllaError IatSearch(
             uint processId,
             ulong imageBase,
@@ -310,6 +362,66 @@ namespace MegaDumper
                 }
             }
         }
+        
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsWow64Process(IntPtr hProcess, out bool wow64Process);
+        
+        /// <summary>
+        /// Checks if the target process is a 32-bit process.
+        /// </summary>
+        /// <param name="processId">Process ID to check</param>
+        /// <returns>True if 32-bit, false if 64-bit or unknown</returns>
+        public static bool IsProcess32Bit(uint processId)
+        {
+            IntPtr hProcess = IntPtr.Zero;
+            try
+            {
+                hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, false, processId);
+                if (hProcess == IntPtr.Zero)
+                {
+                    Console.WriteLine($"[Scylla] Cannot open process {processId} for architecture check");
+                    return false;
+                }
+                
+                // If not on 64-bit OS, everything is 32-bit
+                if (!Environment.Is64BitOperatingSystem)
+                {
+                    return true;
+                }
+                
+                // Check if target process is WoW64 (32-bit on 64-bit OS)
+                if (!IsWow64Process(hProcess, out bool isWow64))
+                {
+                    Console.WriteLine($"[Scylla] Could not determine architecture for process {processId}");
+                    return false;
+                }
+                
+                return isWow64; // WoW64 = 32-bit process on 64-bit OS
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Scylla] Error checking process architecture: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                if (hProcess != IntPtr.Zero)
+                {
+                    CloseHandle(hProcess);
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Legacy compatibility method - always returns true now since we have both DLLs
+        /// </summary>
+        [Obsolete("Use IsProcess32Bit instead to determine which Scylla DLL to use")]
+        public static bool IsProcessArchitectureCompatible(uint processId)
+        {
+            // With both x86 and x64 DLLs available, we can always work with any process
+            return true;
+        }
 
 
         /// <summary>
@@ -323,7 +435,6 @@ namespace MegaDumper
         /// <param name="dumpFilePath">Path to the dumped PE file</param>
         /// <param name="outputFilePath">Path for the fixed output file</param>
         /// <returns>ScyllaError result code</returns>
-        [HandleProcessCorruptedStateExceptions]
         public static ScyllaError IatFix(
             uint processId,
             ulong imageBase,
@@ -384,7 +495,6 @@ namespace MegaDumper
         /// <param name="updateChecksum">Update the PE header checksum</param>
         /// <param name="createBackup">Create a backup before modifying</param>
         /// <returns>True if successful</returns>
-        [HandleProcessCorruptedStateExceptions]
         public static bool RebuildFile(
             string filePath,
             bool removeDosStub = false,
@@ -423,7 +533,6 @@ namespace MegaDumper
         /// <param name="outputPath">Output file path</param>
         /// <param name="inputFilePath">Optional input file path (null to dump from memory)</param>
         /// <returns>True if successful</returns>
-        [HandleProcessCorruptedStateExceptions]
         public static bool DumpProcess(
             uint processId,
             ulong imageBase,
@@ -514,6 +623,161 @@ namespace MegaDumper
                 ScyllaError.ModuleNotFound => "Module not found at specified address",
                 _ => $"Unknown error ({(int)error})"
             };
+        }
+
+        /// <summary>
+        /// Performs full import reconstruction using x86 Scylla DLL explicitly
+        /// Use this for 32-bit target processes
+        /// </summary>
+        public static ScyllaError FixImportsAutoX86(
+            uint processId,
+            ulong imageBase,
+            ulong entryPoint,
+            string dumpFilePath,
+            string outputFilePath,
+            bool advancedSearch = true,
+            bool createNewIat = true)
+        {
+            try
+            {
+                // Validate parameters
+                if (processId == 0 || imageBase == 0)
+                {
+                    return ScyllaError.PidNotFound;
+                }
+                
+                if (!IsProcessAccessible(processId))
+                {
+                    return ScyllaError.ProcessOpenFailed;
+                }
+                
+                // Step 1: Search for IAT using x86 DLL
+                UIntPtr outIatStart;
+                uint outIatSize;
+                
+                int searchResult = ScyllaIatSearch_x86(processId, (UIntPtr)imageBase, out outIatStart, out outIatSize, (UIntPtr)entryPoint, advancedSearch);
+                
+                if (searchResult != 0)
+                {
+                    return (ScyllaError)searchResult;
+                }
+                
+                if (outIatSize == 0)
+                {
+                    return ScyllaError.IatNotFound;
+                }
+                
+                // Step 2: Fix the IAT using x86 DLL
+                int fixResult = ScyllaIatFixAutoW_x86(processId, (UIntPtr)imageBase, outIatStart, outIatSize, createNewIat, dumpFilePath, outputFilePath);
+                
+                return (ScyllaError)fixResult;
+            }
+            catch (System.AccessViolationException)
+            {
+                try { System.IO.File.AppendAllText("scylla_debug.log", $"[{System.DateTime.Now}] [Scylla x86] AccessViolationException in FixImportsAutoX86\n"); } catch {}
+                return ScyllaError.ProcessOpenFailed;
+            }
+            catch (System.Runtime.InteropServices.SEHException sehEx)
+            {
+                try { System.IO.File.AppendAllText("scylla_debug.log", $"[{System.DateTime.Now}] [Scylla x86] SEHException (0x{sehEx.ErrorCode:X})\n"); } catch {}
+                return ScyllaError.IatSearchError;
+            }
+            catch (System.Exception ex)
+            {
+                try { System.IO.File.AppendAllText("scylla_debug.log", $"[{System.DateTime.Now}] [Scylla x86] Exception: {ex.ToString()}\n"); } catch {}
+                return ScyllaError.IatSearchError;
+            }
+        }
+        
+        /// <summary>
+        /// Performs full import reconstruction using x64 Scylla DLL explicitly
+        /// Use this for 64-bit target processes
+        /// </summary>
+        public static ScyllaError FixImportsAutoX64(
+            uint processId,
+            ulong imageBase,
+            ulong entryPoint,
+            string dumpFilePath,
+            string outputFilePath,
+            bool advancedSearch = true,
+            bool createNewIat = true)
+        {
+            try
+            {
+                // Validate parameters
+                if (processId == 0 || imageBase == 0)
+                {
+                    return ScyllaError.PidNotFound;
+                }
+                
+                if (!IsProcessAccessible(processId))
+                {
+                    return ScyllaError.ProcessOpenFailed;
+                }
+                
+                // Step 1: Search for IAT using x64 DLL
+                UIntPtr outIatStart;
+                uint outIatSize;
+                
+                int searchResult = ScyllaIatSearch_x64(processId, (UIntPtr)imageBase, out outIatStart, out outIatSize, (UIntPtr)entryPoint, advancedSearch);
+                
+                if (searchResult != 0)
+                {
+                    return (ScyllaError)searchResult;
+                }
+                
+                if (outIatSize == 0)
+                {
+                    return ScyllaError.IatNotFound;
+                }
+                
+                // Step 2: Fix the IAT using x64 DLL
+                int fixResult = ScyllaIatFixAutoW_x64(processId, (UIntPtr)imageBase, outIatStart, outIatSize, createNewIat, dumpFilePath, outputFilePath);
+                
+                return (ScyllaError)fixResult;
+            }
+            catch (System.AccessViolationException)
+            {
+                try { System.IO.File.AppendAllText("scylla_debug.log", $"[{System.DateTime.Now}] [Scylla x64] AccessViolationException in FixImportsAutoX64\n"); } catch {}
+                return ScyllaError.ProcessOpenFailed;
+            }
+            catch (System.Runtime.InteropServices.SEHException sehEx)
+            {
+                try { System.IO.File.AppendAllText("scylla_debug.log", $"[{System.DateTime.Now}] [Scylla x64] SEHException (0x{sehEx.ErrorCode:X})\n"); } catch {}
+                return ScyllaError.IatSearchError;
+            }
+            catch (System.Exception ex)
+            {
+                try { System.IO.File.AppendAllText("scylla_debug.log", $"[{System.DateTime.Now}] [Scylla x64] Exception: {ex.ToString()}\n"); } catch {}
+                return ScyllaError.IatSearchError;
+            }
+        }
+        
+        /// <summary>
+        /// Performs full import reconstruction, automatically selecting the correct Scylla DLL
+        /// based on the target process architecture
+        /// </summary>
+        public static ScyllaError FixImportsAutoDetect(
+            uint processId,
+            ulong imageBase,
+            ulong entryPoint,
+            string dumpFilePath,
+            string outputFilePath,
+            bool advancedSearch = true,
+            bool createNewIat = true)
+        {
+            bool is32BitProcess = IsProcess32Bit(processId);
+            
+            Console.WriteLine($"[Scylla] Process {processId} is {(is32BitProcess ? "32-bit" : "64-bit")}, using Scylla_{(is32BitProcess ? "x86" : "x64")}");
+            
+            if (is32BitProcess)
+            {
+                return FixImportsAutoX86(processId, imageBase, entryPoint, dumpFilePath, outputFilePath, advancedSearch, createNewIat);
+            }
+            else
+            {
+                return FixImportsAutoX64(processId, imageBase, entryPoint, dumpFilePath, outputFilePath, advancedSearch, createNewIat);
+            }
         }
 
         #endregion

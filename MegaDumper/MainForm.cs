@@ -2704,9 +2704,6 @@ namespace Mega_Dumper
                                         }
                                         catch {}
 
-                                        File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                            $"[{DateTime.Now}] Starting Scylla for {Path.GetFileName(dumpedFile)} (Base=0x{imageBase:X})...\n");
-
                                         // We need EntryPoint. 
                                         // Since we know ImageBase, we can read the EP RVA from the file header and add it.
                                         ulong entryPoint = imageBase;
@@ -2749,6 +2746,26 @@ namespace Mega_Dumper
                                                 File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
                                                     $"[{DateTime.Now}] Patched FileAlignment from 0x{fileAlignment:X} to 0x{sectionAlignment:X} for {fileNameNoExt}\n");
                                             }
+                                        }
+                                        
+                                        // Log PE architecture and check compatibility
+                                        File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                            $"[{DateTime.Now}] Starting Scylla for {Path.GetFileName(dumpedFile)} (Base=0x{imageBase:X}, PE={(!is64 ? "32-bit" : "64-bit")})...\n");
+                                        
+                                        // CRITICAL: Scylla DLL injection only works if Host and Target architectures match
+                                        // 64-bit MegaDumper -> can only dump 64-bit PEs (using Scylla.dll)
+                                        // 32-bit MegaDumper -> can only dump 32-bit PEs (using Scylla.dll)
+                                        
+                                        bool isHost64 = IntPtr.Size == 8;
+                                        
+                                        if (is64 != isHost64)
+                                        {
+                                            string hostArch = isHost64 ? "64-bit" : "32-bit";
+                                            string targetArch = is64 ? "64-bit" : "32-bit";
+                                            
+                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                $"[{DateTime.Now}] Skipping {targetArch} PE {Path.GetFileName(dumpedFile)} - Host is {hostArch}. Architectures must match.\n");
+                                            continue;
                                         }
 
                                         // OEP DETECTION STRATEGY (Thread Context):
@@ -2872,11 +2889,20 @@ namespace Mega_Dumper
                                                         $"  Result: {scyResult} (attempt {retryAttempt + 1})\n");
                                                     break; // Success, exit retry loop
                                                 }
-                                                else if (scyResult == MegaDumper.ScyllaError.ProcessOpenFailed)
+                                                else if (scyResult == MegaDumper.ScyllaError.ProcessOpenFailed ||
+                                                         scyResult == MegaDumper.ScyllaError.PidNotFound ||
+                                                         scyResult == MegaDumper.ScyllaError.ModuleNotFound)
                                                 {
-                                                    // Process is gone, no point retrying
+                                                    // Process is gone or not found, no point retrying
                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                        $"  Result: {scyResult} - process not accessible, skipping retries\n");
+                                                        $"  Result: {scyResult} - process/module not accessible, skipping retries\n");
+                                                    break;
+                                                }
+                                                else if (scyResult == MegaDumper.ScyllaError.IatNotFound)
+                                                {
+                                                    // IAT not found - might succeed with different entry point
+                                                    File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                        $"  Result: {scyResult} - IAT not found at this entry point, skipping\n");
                                                     break;
                                                 }
                                                 else

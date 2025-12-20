@@ -2530,7 +2530,7 @@ namespace Mega_Dumper
                                                                             entryPointAddr,
                                                                             filename,
                                                                             scyFixFilename,
-                                                                            advancedSearch: false,  // Use basic search - advanced search can crash on protected memory
+                                                                            advancedSearch: true,
                                                                             createNewIat: true);
 
                                                                         if (scyResult == MegaDumper.ScyllaError.Success)

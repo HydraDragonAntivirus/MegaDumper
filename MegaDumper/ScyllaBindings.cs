@@ -214,6 +214,13 @@ namespace MegaDumper
                     return ScyllaError.PidNotFound;
                 }
                 
+                // Check if process is still alive and accessible before calling Scylla
+                if (!IsProcessAccessible(processId))
+                {
+                    Console.WriteLine($"[Scylla] Process {processId} is not accessible - skipping IAT search");
+                    return ScyllaError.ProcessOpenFailed;
+                }
+                
                 UIntPtr outIatStart;
                 uint outIatSize;
 
@@ -237,6 +244,66 @@ namespace MegaDumper
                 return ScyllaError.IatSearchError;
             }
         }
+        
+        // Native imports for process validation
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+        
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseHandle(IntPtr hObject);
+        
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
+        
+        private const uint PROCESS_QUERY_INFORMATION = 0x0400;
+        private const uint PROCESS_VM_READ = 0x0010;
+        private const uint STILL_ACTIVE = 259;
+        
+        /// <summary>
+        /// Checks if a process is still alive and accessible for memory operations
+        /// </summary>
+        private static bool IsProcessAccessible(uint processId)
+        {
+            IntPtr hProcess = IntPtr.Zero;
+            try
+            {
+                hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, processId);
+                if (hProcess == IntPtr.Zero)
+                {
+                    Console.WriteLine($"[Scylla] Cannot open process {processId} for validation");
+                    return false;
+                }
+                
+                if (!GetExitCodeProcess(hProcess, out uint exitCode))
+                {
+                    Console.WriteLine($"[Scylla] Cannot get exit code for process {processId}");
+                    return false;
+                }
+                
+                if (exitCode != STILL_ACTIVE)
+                {
+                    Console.WriteLine($"[Scylla] Process {processId} has exited with code {exitCode}");
+                    return false;
+                }
+                
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Scylla] Error validating process {processId}: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                if (hProcess != IntPtr.Zero)
+                {
+                    CloseHandle(hProcess);
+                }
+            }
+        }
+
 
         /// <summary>
         /// Automatically fixes the IAT of a dumped PE file

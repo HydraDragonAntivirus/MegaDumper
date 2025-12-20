@@ -2885,13 +2885,6 @@ namespace Mega_Dumper
                                                         $"  Result: {scyResult} (attempt {retryAttempt + 1}, Start=0x{currentSearchStart:X})\n");
                                                     break; // Success, exit retry loop
                                                 }
-                                                else if (scyResult == MegaDumper.ScyllaError.PidNotFound)
-                                                {
-                                                    // PID not found is fatal for this module
-                                                    File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                        $"  Result: {scyResult} - PID not found, skipping retries\n");
-                                                    break;
-                                                }
                                                 else if (scyResult == MegaDumper.ScyllaError.IatNotFound)
                                                 {
                                                     // IAT not found - might succeed with different entry point
@@ -2902,7 +2895,7 @@ namespace Mega_Dumper
                                                 else
                                                 {
                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                        $"  Attempt {retryAttempt + 1}: {scyResult}, will retry...\n");
+                                                        $"  Attempt {retryAttempt + 1}: {scyResult}, will continue to fallbacks...\n");
                                                 }
                                             }
                                             catch (Exception scyEx)

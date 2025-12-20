@@ -1437,6 +1437,7 @@ namespace Mega_Dumper
         /// Sanitizes a Scylla-fixed PE file by removing invalid import descriptors.
         /// This is necessary because Scylla's advanced search can generate garbage imports
         /// with DLL names like "?.DLL" or containing unprintable characters.
+        /// This function COMPACTS valid imports together (doesn't just zero invalid ones).
         /// </summary>
         /// <param name="filePath">Path to the scyfix file to sanitize</param>
         /// <returns>True if sanitization was successful or no changes were needed</returns>
@@ -1504,37 +1505,45 @@ namespace Mega_Dumper
 
                 Console.WriteLine($"[Scylla Sanitize] Scanning import directory at offset 0x{importDirOffset:X}");
 
-                bool modified = false;
-                int removedCount = 0;
-                int current = 0;
                 const int IMPORT_DESCRIPTOR_SIZE = 20; // sizeof(IMAGE_IMPORT_DESCRIPTOR)
+                
+                // First pass: collect all descriptors and determine which are valid
+                var allDescriptors = new System.Collections.Generic.List<byte[]>();
+                var validDescriptors = new System.Collections.Generic.List<byte[]>();
+                var invalidNames = new System.Collections.Generic.List<string>();
+                int current = 0;
 
-                // Parse import descriptors (20 bytes each)
+                // Parse all import descriptors
                 while (importDirOffset + current + IMPORT_DESCRIPTOR_SIZE <= fileData.Length)
                 {
+                    // Read the descriptor
+                    byte[] descriptor = new byte[IMPORT_DESCRIPTOR_SIZE];
+                    Array.Copy(fileData, importDirOffset + current, descriptor, 0, IMPORT_DESCRIPTOR_SIZE);
+                    
                     // Check if this is a null terminator (all zeros)
-                    int nameRva = BitConverter.ToInt32(fileData, importDirOffset + current + 12);
+                    int nameRva = BitConverter.ToInt32(descriptor, 12);
                     if (nameRva == 0)
                     {
                         // End of import directory
                         break;
                     }
+                    
+                    allDescriptors.Add(descriptor);
 
                     // Get the DLL name
                     int nameOffset = RVA2Offset(fileData, nameRva);
-                    bool isInvalid = false;
-                    string dllName = "";
+                    bool isValid = true;
+                    string dllName = "<unknown>";
 
                     if (nameOffset < 0 || nameOffset >= fileData.Length)
                     {
-                        // Invalid name RVA - mark for removal
-                        isInvalid = true;
-                        Console.WriteLine($"[Scylla Sanitize] Import at 0x{(importDirOffset + current):X}: Invalid name RVA 0x{nameRva:X}");
+                        isValid = false;
+                        dllName = $"<invalid RVA 0x{nameRva:X}>";
                     }
                     else
                     {
                         // Read the DLL name (null-terminated ASCII string)
-                        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+                        var sb = new System.Text.StringBuilder();
                         int maxLen = Math.Min(260, fileData.Length - nameOffset);
                         for (int i = 0; i < maxLen; i++)
                         {
@@ -1545,40 +1554,72 @@ namespace Mega_Dumper
                         dllName = sb.ToString();
 
                         // Check if DLL name is valid
-                        // Invalid if: empty, contains '?', starts with invalid char, or has unprintable chars
+                        // Invalid if: empty, contains '?', has unprintable chars, or doesn't end with .dll
                         if (string.IsNullOrEmpty(dllName) ||
                             dllName.Contains("?") ||
                             dllName.Any(c => c < 32 || c > 126) ||
                             !dllName.ToLower().EndsWith(".dll"))
                         {
-                            isInvalid = true;
-                            Console.WriteLine($"[Scylla Sanitize] Import at 0x{(importDirOffset + current):X}: Invalid DLL name \"{dllName}\"");
+                            isValid = false;
                         }
                     }
 
-                    if (isInvalid)
+                    if (isValid)
                     {
-                        // Zero out this import descriptor to remove it
-                        for (int i = 0; i < IMPORT_DESCRIPTOR_SIZE; i++)
-                        {
-                            fileData[importDirOffset + current + i] = 0;
-                        }
-                        modified = true;
-                        removedCount++;
+                        validDescriptors.Add(descriptor);
+                        Console.WriteLine($"[Scylla Sanitize] Valid import: {dllName}");
+                    }
+                    else
+                    {
+                        invalidNames.Add(dllName);
+                        Console.WriteLine($"[Scylla Sanitize] REMOVING invalid import: \"{dllName}\"");
                     }
 
                     current += IMPORT_DESCRIPTOR_SIZE;
                 }
 
-                if (modified)
-                {
-                    Console.WriteLine($"[Scylla Sanitize] Removed {removedCount} invalid import(s), writing sanitized file");
-                    System.IO.File.WriteAllBytes(filePath, fileData);
-                }
-                else
+                // Check if we need to modify the file
+                if (invalidNames.Count == 0)
                 {
                     Console.WriteLine("[Scylla Sanitize] No invalid imports found");
+                    return true;
                 }
+
+                Console.WriteLine($"[Scylla Sanitize] Compacting import table: {validDescriptors.Count} valid, {invalidNames.Count} removed");
+
+                // Second pass: Write valid descriptors contiguously, then null terminator
+                int writeOffset = importDirOffset;
+                
+                // Write all valid descriptors
+                foreach (var descriptor in validDescriptors)
+                {
+                    if (writeOffset + IMPORT_DESCRIPTOR_SIZE <= fileData.Length)
+                    {
+                        Array.Copy(descriptor, 0, fileData, writeOffset, IMPORT_DESCRIPTOR_SIZE);
+                        writeOffset += IMPORT_DESCRIPTOR_SIZE;
+                    }
+                }
+                
+                // Write null terminator (20 zero bytes)
+                for (int i = 0; i < IMPORT_DESCRIPTOR_SIZE; i++)
+                {
+                    if (writeOffset + i < fileData.Length)
+                    {
+                        fileData[writeOffset + i] = 0;
+                    }
+                }
+                writeOffset += IMPORT_DESCRIPTOR_SIZE;
+                
+                // Zero out any remaining space that was used by old descriptors
+                int oldEndOffset = importDirOffset + (allDescriptors.Count + 1) * IMPORT_DESCRIPTOR_SIZE;
+                for (int i = writeOffset; i < oldEndOffset && i < fileData.Length; i++)
+                {
+                    fileData[i] = 0;
+                }
+
+                // Write the sanitized file
+                Console.WriteLine($"[Scylla Sanitize] Writing sanitized file with {validDescriptors.Count} imports");
+                File.WriteAllBytes(filePath, fileData);
 
                 return true;
             }
@@ -2489,7 +2530,7 @@ namespace Mega_Dumper
                                                                             entryPointAddr,
                                                                             filename,
                                                                             scyFixFilename,
-                                                                            advancedSearch: true,
+                                                                            advancedSearch: false,  // Use basic search - advanced search can crash on protected memory
                                                                             createNewIat: true);
 
                                                                         if (scyResult == MegaDumper.ScyllaError.Success)

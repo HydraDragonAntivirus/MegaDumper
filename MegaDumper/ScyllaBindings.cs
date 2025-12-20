@@ -1,11 +1,11 @@
 /*
  * ScyllaBindings.cs
- * C# P/Invoke bindings for Scylla Import Reconstruction DLL (x64)
+ * Final fixed version for Scylla Import Reconstruction DLL (x64)
+ * Fully protected with try-catch and correct signatures.
  */
 
 using System;
 using System.Runtime.InteropServices;
-using System.Runtime.ExceptionServices;
 using System.IO;
 
 namespace MegaDumper
@@ -34,15 +34,14 @@ namespace MegaDumper
                     var version = VersionInformation();
                     return !string.IsNullOrEmpty(version);
                 }
-                catch (Exception ex)
+                catch
                 {
-                    LastLoadError = $"Load error: {ex.GetType().Name} - {ex.Message}";
                     return false;
                 }
             }
         }
         
-        public static string LastLoadError { get; private set; } = string.Empty;
+        public static string LastLoadError { get; set; } = string.Empty;
 
         #region Native Imports
 
@@ -52,6 +51,7 @@ namespace MegaDumper
         [DllImport("Scylla.dll", EntryPoint = "ScyllaIatSearch", CallingConvention = CallingConvention.StdCall)]
         private static extern int ScyllaIatSearch_x64(
             uint dwProcessId,
+            UIntPtr imagebase,
             out UIntPtr iatStart,
             out uint iatSize,
             UIntPtr searchStart,
@@ -91,28 +91,27 @@ namespace MegaDumper
             try { return Marshal.PtrToStringUni(ScyllaVersionInformationW_x64()); } catch { return null; }
         }
 
-        public static bool IsProcessAccessible(uint processId)
-        {
-            try
-            {
-                using (var proc = System.Diagnostics.Process.GetProcessById((int)processId)) { return !proc.HasExited; }
-            }
-            catch { return false; }
-        }
-
         public static int IatSearch(uint processId, ulong imageBase, out UIntPtr iatStart, out uint iatSize, ulong searchStart, bool advancedSearch)
         {
-             return ScyllaIatSearch_x64(processId, out iatStart, out iatSize, (UIntPtr)searchStart, advancedSearch);
+             iatStart = UIntPtr.Zero;
+             iatSize = 0;
+             try {
+                return ScyllaIatSearch_x64(processId, (UIntPtr)imageBase, out iatStart, out iatSize, (UIntPtr)searchStart, advancedSearch);
+             } catch { return (int)ScyllaError.IatSearchError; }
         }
 
         public static ScyllaError IatFix(uint processId, ulong imageBase, UIntPtr iatStart, uint iatSize, bool createNewIat, string dumpFilePath, string outputFilePath)
         {
-             return (ScyllaError)ScyllaIatFixAutoW_x64(processId, (UIntPtr)imageBase, iatStart, iatSize, createNewIat, dumpFilePath, outputFilePath);
+             try {
+                return (ScyllaError)ScyllaIatFixAutoW_x64(processId, (UIntPtr)imageBase, iatStart, iatSize, createNewIat, dumpFilePath, outputFilePath);
+             } catch { return ScyllaError.IatWriteError; }
         }
 
         public static bool RebuildFile(string filePath, bool removeDosStub, bool updatePeHeaderChecksum, bool createBackup)
         {
-             return ScyllaRebuildFileW_x64(filePath, removeDosStub, updatePeHeaderChecksum, createBackup);
+             try {
+                return ScyllaRebuildFileW_x64(filePath, removeDosStub, updatePeHeaderChecksum, createBackup);
+             } catch { return false; }
         }
 
         public static ScyllaError FixImportsAutoDetect(
@@ -124,7 +123,6 @@ namespace MegaDumper
             bool advancedSearch = true,
             bool createNewIat = true)
         {
-            // Always use x64 Scylla (Handles WoW64 automatically)
             return FixImportsAutoX64(processId, imageBase, entryPoint, dumpFilePath, outputFilePath, advancedSearch, createNewIat);
         }
 
@@ -139,45 +137,38 @@ namespace MegaDumper
         {
             try
             {
-                if (!IsProcessAccessible(processId)) return ScyllaError.ProcessOpenFailed;
-                
                 UIntPtr outIatStart;
                 uint outIatSize;
                 
-                int searchResult = ScyllaIatSearch_x64(processId, out outIatStart, out outIatSize, (UIntPtr)entryPoint, advancedSearch);
+                int searchResult = ScyllaIatSearch_x64(processId, (UIntPtr)imageBase, out outIatStart, out outIatSize, (UIntPtr)entryPoint, advancedSearch);
                 
                 if (searchResult != 0) return (ScyllaError)searchResult;
                 if (outIatSize == 0) return ScyllaError.IatNotFound;
                 
                 return (ScyllaError)ScyllaIatFixAutoW_x64(processId, (UIntPtr)imageBase, outIatStart, outIatSize, createNewIat, dumpFilePath, outputFilePath);
             }
-            catch (Exception) { return ScyllaError.ProcessOpenFailed; }
+            catch (Exception ex)
+            {
+                try { File.AppendAllText("scylla_error.log", $"[Exception] {DateTime.Now}: {ex.Message}\n{ex.StackTrace}\n"); } catch {}
+                return ScyllaError.ProcessOpenFailed;
+            }
         }
 
         public static bool DumpProcessX64(uint processId, ulong imageBase, ulong entryPoint, string outputPath, string inputFilePath = null)
         {
             try
             {
-                if (!IsProcessAccessible(processId)) return false;
                 return ScyllaDumpProcessW_x64((UIntPtr)processId, inputFilePath, (UIntPtr)imageBase, (UIntPtr)entryPoint, outputPath);
             }
             catch { return false; }
         }
 
-        // Methods invoked by MainForm that we determine are necessary to keep for compatibility
         public static bool IsProcess32Bit(uint processId)
         {
-            // Simplified check or just return true/false if needed. 
-            // MainForm assumes this method exists.
-            
-            // Re-implement IsProcess32Bit correctly as used by MainForm logic?
-            // Actually, now we don't need it for dispatch, but MainForm might call it for display?
-            // Yes, MainForm checks it. We should keep it.
-            
             IntPtr hProcess = IntPtr.Zero;
             try
             {
-                hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, false, processId);
+                hProcess = OpenProcess(0x0400, false, processId);
                 if (hProcess == IntPtr.Zero) return false;
                 if (!Environment.Is64BitOperatingSystem) return true;
                 if (!IsWow64Process(hProcess, out bool isWow64)) return false;
@@ -197,8 +188,5 @@ namespace MegaDumper
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool IsWow64Process(IntPtr hProcess, out bool wow64Process);
-
-        private const uint PROCESS_QUERY_INFORMATION = 0x0400;
-        
     }
 }

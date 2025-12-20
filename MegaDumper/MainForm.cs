@@ -2866,10 +2866,14 @@ namespace Mega_Dumper
                                                     break;
                                                 }
 
+                                                // Fallback: If 1st attempt (OEP) failed, try ImageBase on subsequent attempts.
+                                                // This helps if OEP is in shellcode (outside module) causing ModuleNotFound.
+                                                ulong currentSearchStart = (retryAttempt == 0) ? finalEntryPoint : imageBase;
+
                                                 scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
                                                     processId,
                                                     imageBase,
-                                                    finalEntryPoint,
+                                                    currentSearchStart,
                                                     dumpedFile,
                                                     scyFixFilename,
                                                     advancedSearch: true,
@@ -2878,16 +2882,14 @@ namespace Mega_Dumper
                                                 if (scyResult == MegaDumper.ScyllaError.Success)
                                                 {
                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                        $"  Result: {scyResult} (attempt {retryAttempt + 1})\n");
+                                                        $"  Result: {scyResult} (attempt {retryAttempt + 1}, Start=0x{currentSearchStart:X})\n");
                                                     break; // Success, exit retry loop
                                                 }
-                                                else if (scyResult == MegaDumper.ScyllaError.ProcessOpenFailed ||
-                                                         scyResult == MegaDumper.ScyllaError.PidNotFound ||
-                                                         scyResult == MegaDumper.ScyllaError.ModuleNotFound)
+                                                else if (scyResult == MegaDumper.ScyllaError.PidNotFound)
                                                 {
-                                                    // Process is gone or not found, no point retrying
+                                                    // PID not found is fatal for this module
                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                        $"  Result: {scyResult} - process/module not accessible, skipping retries\n");
+                                                        $"  Result: {scyResult} - PID not found, skipping retries\n");
                                                     break;
                                                 }
                                                 else if (scyResult == MegaDumper.ScyllaError.IatNotFound)
@@ -2903,23 +2905,9 @@ namespace Mega_Dumper
                                                         $"  Attempt {retryAttempt + 1}: {scyResult}, will retry...\n");
                                                 }
                                             }
-                                            catch (AccessViolationException avEx)
-                                            {
-                                                // Native crash caught - log and retry
-                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
-                                                    $"  Attempt {retryAttempt + 1}: AccessViolation caught ({avEx.Message}), will retry...\n");
-                                                scyResult = MegaDumper.ScyllaError.ProcessOpenFailed;
-                                            }
-                                            catch (SEHException sehEx)
-                                            {
-                                                // Structured Exception from native code
-                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
-                                                    $"  Attempt {retryAttempt + 1}: SEHException caught (0x{sehEx.ErrorCode:X}), will retry...\n");
-                                                scyResult = MegaDumper.ScyllaError.IatSearchError;
-                                            }
                                             catch (Exception scyEx)
                                             {
-                                                // Any other exception
+                                                // Any other non-corrupted state exception
                                                 File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
                                                     $"  Attempt {retryAttempt + 1}: {scyEx.GetType().Name} - {scyEx.Message}, will retry...\n");
                                                 scyResult = MegaDumper.ScyllaError.IatSearchError;
@@ -2929,6 +2917,114 @@ namespace Mega_Dumper
                                             if (retryAttempt < maxRetries - 1)
                                             {
                                                 System.Threading.Thread.Sleep(retryDelay * (retryAttempt + 1));
+                                            }
+                                        }
+
+                                        // FALLBACK STRATEGY: Scylla Native Dump
+                                        // If standard fix failed (likely ModuleNotFound on hidden module), 
+                                        // try asking Scylla to dump it natively. If Scylla creates its own dump,
+                                        // it sometimes handles hidden modules better when searching for IAT.
+                                        if (scyResult != MegaDumper.ScyllaError.Success)
+                                        {
+                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                "  Standard fix failed. Attempting Scylla Native Dump Fallback...\n");
+                                            
+                                            string scyNativeDump = Path.Combine(Path.GetDirectoryName(dumpedFile), "scy_native_" + Path.GetFileName(dumpedFile));
+                                            
+                                            // Try native dump (using dumpedFile as template/hint for Scylla)
+                                            bool dumpSuccess = MegaDumper.ScyllaBindings.DumpProcessX64(processId, imageBase, finalEntryPoint, scyNativeDump, dumpedFile);
+                                            
+                                            if (dumpSuccess && File.Exists(scyNativeDump))
+                                            {
+                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                    $"  Native dump created: {Path.GetFileName(scyNativeDump)}. Retrying fix on native dump...\n");
+                                                
+                                                scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
+                                                    processId,
+                                                    imageBase,
+                                                    finalEntryPoint,
+                                                    scyNativeDump,
+                                                    scyFixFilename,
+                                                    advancedSearch: true,
+                                                    createNewIat: true);
+                                                
+                                                if (scyResult == MegaDumper.ScyllaError.Success)
+                                                {
+                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                         "  Fallback Success! Scyfix created from native Scylla dump.\n");
+                                                }
+                                                else
+                                                {
+                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                         $"  Fallback Fix Failed: {scyResult}\n");
+                                                }
+                                            }
+                                            else
+                                            {
+                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                    $"  Native dump fallback failed (PID: {processId}, Base: 0x{imageBase:X}).\n");
+                                            }
+                                        }
+
+                                        // FINAL FALLBACK: Manual IAT Recovery from PE Header
+                                        // If everything else fails (likely ModuleNotFound on hidden/unlinked module),
+                                        // we manually parse the dumped PE header to find the IAT.
+                                        if (scyResult != MegaDumper.ScyllaError.Success)
+                                        {
+                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                "  Native dump failed or not enough. Attempting Manual IAT Recovery from Header...\n");
+                                            
+                                            try
+                                            {
+                                                byte[] peData = File.ReadAllBytes(dumpedFile);
+                                                int peHead = BitConverter.ToInt32(peData, 0x3C);
+                                                int optHead = peHead + 4 + 20;
+                                                bool pe64 = BitConverter.ToUInt16(peData, optHead) == 0x20B;
+                                                int dataDirOffset = optHead + (pe64 ? 112 : 96);
+                                                
+                                                // Import Directory is Index 1
+                                                uint importRva = BitConverter.ToUInt32(peData, dataDirOffset + 8);
+                                                uint importSize = BitConverter.ToUInt32(peData, dataDirOffset + 12);
+                                                
+                                                // IAT Directory is Index 12
+                                                uint iatRva = BitConverter.ToUInt32(peData, dataDirOffset + (12 * 8));
+                                                uint iatSize = BitConverter.ToUInt32(peData, dataDirOffset + (12 * 8) + 4);
+
+                                                if (iatRva > 0 && iatSize > 0)
+                                                {
+                                                    File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                        $"  Found IAT in Header: RVA=0x{iatRva:X}, Size=0x{iatSize:X}. Calling IatFix directly...\n");
+                                                    
+                                                    scyResult = MegaDumper.ScyllaBindings.IatFix(
+                                                        processId,
+                                                        imageBase,
+                                                        (UIntPtr)(imageBase + iatRva),
+                                                        iatSize,
+                                                        true,
+                                                        dumpedFile,
+                                                        scyFixFilename);
+                                                    
+                                                    if (scyResult == MegaDumper.ScyllaError.Success)
+                                                    {
+                                                        File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                            "  Manual IAT Recovery Success! Scyfix created.\n");
+                                                    }
+                                                    else
+                                                    {
+                                                        File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                            $"  Manual IAT Fix Failed: {scyResult}\n");
+                                                    }
+                                                }
+                                                else
+                                                {
+                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                        "  No IAT/Imports found in PE Header data directory.\n");
+                                                }
+                                            }
+                                            catch (Exception headerEx)
+                                            {
+                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                    $"  Error during manual IAT recovery: {headerEx.Message}\n");
                                             }
                                         }
 

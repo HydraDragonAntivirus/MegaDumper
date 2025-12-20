@@ -1,7 +1,8 @@
 {
     "runtimeOptions": {
         "configProperties": {
-            "System.GC.Concurrent": true
+            "System.GC.Concurrent": true,
+            "System.Runtime.LegacyCorruptedStateExceptionsPolicy": true
         }
     }
 }

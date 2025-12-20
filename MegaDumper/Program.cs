@@ -5,6 +5,7 @@
  * - Supports CLI when run with arguments
  * - Allocates a console automatically when needed (so this file can be used in a Windows Application build)
  * - Better argument parsing, exit codes, and optional pause-for-read (--wait)
+ * - CRITICAL: Enables legacy corrupted state exception handling for .NET 8 compatibility with Scylla.dll
  */
 
 using System;
@@ -26,12 +27,37 @@ namespace Mega_Dumper
         private static extern bool FreeConsole();
 
         /// <summary>
+        /// Static constructor runs BEFORE Main(). This is critical for setting up
+        ///環境 variables that must be present before P/Invoke calls are made.
+        /// </summary>
+        static Program()
+        {
+            // CRITICAL: Enable legacy corrupted state exception handling for .NET 8
+            // Without this, AccessViolationException from Scylla.dll P/Invoke calls
+            // will terminate the process. This MUST be set before any P/Invoke calls.
+            try
+            {
+                Environment.SetEnvironmentVariable("COMPlus_legacyCorruptedStateExceptionsPolicy", "1");
+            }
+            catch
+            {
+                // If this fails, we're in trouble but don't crash here
+            }
+        }
+
+        /// <summary>
         /// Single entry point. Runs GUI when no arguments are present, otherwise runs CLI mode.
         /// Keep this method synchronous and STA so WinForms/WPF behavior remains correct.
         /// </summary>
         [STAThread]
         private static int Main(string[] args)
         {
+            // Set up global exception handlers to prevent crashes
+            AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
+            TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
+            Application.ThreadException += Application_ThreadException;
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+
             // No args -> normal GUI mode
             if (args == null || args.Length == 0)
             {
@@ -40,6 +66,7 @@ namespace Mega_Dumper
                 Application.Run(new MainForm());
                 return 0;
             }
+
 
             // We have CLI args: ensure a console is present (useful when built as Windows Application)
             if (!AllocConsole())
@@ -188,6 +215,91 @@ namespace Mega_Dumper
             Console.WriteLine("  --wait    Pause and wait for a keypress before the program exits (helpful when double-clicking the exe)");
             Console.WriteLine("  --help    Show this help message");
             Console.WriteLine();
+        }
+
+        /// <summary>
+        /// Handles unhandled exceptions on the AppDomain level
+        /// </summary>
+        private static void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)
+        {
+            try
+            {
+                var ex = e.ExceptionObject as Exception;
+                string message = ex != null 
+                    ? $"Unhandled exception: {ex.GetType().Name} - {ex.Message}\n{ex.StackTrace}"
+                    : "Unknown unhandled exception";
+                
+                // Log to file
+                try
+                {
+                    string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash_log.txt");
+                    File.AppendAllText(logPath, $"[{DateTime.Now}] {message}\n\n");
+                }
+                catch { /* Can't log, nothing we can do */ }
+
+                // Show message if possible (non-terminating exceptions)
+                if (!e.IsTerminating)
+                {
+                    MessageBox.Show($"An error occurred:\n\n{ex?.Message ?? "Unknown error"}\n\nThe operation will continue if possible.", 
+                        "MegaDumper Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            catch { /* Catastrophic failure - can't handle it */ }
+        }
+
+        /// <summary>
+        /// Handles unobserved task exceptions (async exceptions that weren't awaited)
+        /// </summary>
+        private static void TaskScheduler_UnobservedTaskException(object sender, UnobservedTaskExceptionEventArgs e)
+        {
+            try
+            {
+                // Mark as observed to prevent crash
+                e.SetObserved();
+                
+                string message = $"Unobserved task exception: {e.Exception?.Message}\n{e.Exception?.StackTrace}";
+                
+                // Log to file
+                try
+                {
+                    string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash_log.txt");
+                    File.AppendAllText(logPath, $"[{DateTime.Now}] {message}\n\n");
+                }
+                catch { }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Handles exceptions on the Windows Forms UI thread
+        /// </summary>
+        private static void Application_ThreadException(object sender, System.Threading.ThreadExceptionEventArgs e)
+        {
+            try
+            {
+                string message = $"UI thread exception: {e.Exception?.GetType().Name} - {e.Exception?.Message}\n{e.Exception?.StackTrace}";
+                
+                // Log to file
+                try
+                {
+                    string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash_log.txt");
+                    File.AppendAllText(logPath, $"[{DateTime.Now}] {message}\n\n");
+                }
+                catch { }
+
+                // Check if this is an AccessViolationException from Scylla
+                if (e.Exception is AccessViolationException)
+                {
+                    MessageBox.Show("A memory access error occurred in Scylla.dll. The operation was aborted but the application will continue.\n\nThis can happen when the target process exits or has invalid memory.", 
+                        "Scylla Memory Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+                else
+                {
+                    MessageBox.Show($"An error occurred:\n\n{e.Exception?.Message ?? "Unknown error"}\n\nClick OK to continue.", 
+                        "MegaDumper Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            catch { }
         }
     }
 }

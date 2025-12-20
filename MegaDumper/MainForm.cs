@@ -2710,6 +2710,7 @@ namespace Mega_Dumper
                                         // We need EntryPoint. 
                                         // Since we know ImageBase, we can read the EP RVA from the file header and add it.
                                         ulong entryPoint = imageBase;
+                                        bool is64 = IntPtr.Size == 8; // Default to current process architecture
                                         byte[] header = new byte[0x400];
                                         using (FileStream fs = new FileStream(dumpedFile, FileMode.Open, FileAccess.Read))
                                         {
@@ -2719,7 +2720,8 @@ namespace Mega_Dumper
                                         if (peOffset > 0 && peOffset < 0x300)
                                         {
                                             int optHeaderOffset = peOffset + 4 + 20;
-                                            bool is64 = BitConverter.ToUInt16(header, peOffset + 4 + 20) == 0x20B; 
+                                            // Determine if target PE is 64-bit (0x20B = PE32+)
+                                            is64 = BitConverter.ToUInt16(header, optHeaderOffset) == 0x20B; 
                                             uint epRva = BitConverter.ToUInt32(header, optHeaderOffset + 16);
                                             entryPoint = imageBase + epRva;
                                             
@@ -2827,21 +2829,102 @@ namespace Mega_Dumper
                                             // Let's assume Thread finding works for unpacked apps.
                                         }
 
-                                        var scyResult = MegaDumper.ScyllaBindings.FixImportsAuto(
-                                            processId,
-                                            imageBase,
-                                            finalEntryPoint,
-                                            dumpedFile,
-                                            scyFixFilename,
-                                            advancedSearch: true,
-                                            createNewIat: true);
-                                            
-                                        File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                            $"  Result: {scyResult}\n");
+                                        // Scylla call with retry logic for memory reconstruction
+                                        MegaDumper.ScyllaError scyResult = MegaDumper.ScyllaError.IatSearchError;
+                                        int maxRetries = 3;
+                                        int retryDelay = 100; // ms
+                                        
+                                        for (int retryAttempt = 0; retryAttempt < maxRetries; retryAttempt++)
+                                        {
+                                            try
+                                            {
+                                                // Re-check if process is still alive before each attempt
+                                                try
+                                                {
+                                                    using (var checkProc = System.Diagnostics.Process.GetProcessById((int)processId))
+                                                    {
+                                                        if (checkProc.HasExited)
+                                                        {
+                                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+                                                                $"[{DateTime.Now}] Process exited, skipping Scylla fix.\n");
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                catch
+                                                {
+                                                    // Process no longer accessible
+                                                    break;
+                                                }
+
+                                                scyResult = MegaDumper.ScyllaBindings.FixImportsAuto(
+                                                    processId,
+                                                    imageBase,
+                                                    finalEntryPoint,
+                                                    dumpedFile,
+                                                    scyFixFilename,
+                                                    advancedSearch: true,
+                                                    createNewIat: true);
+                                                
+                                                if (scyResult == MegaDumper.ScyllaError.Success)
+                                                {
+                                                    File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                        $"  Result: {scyResult} (attempt {retryAttempt + 1})\n");
+                                                    break; // Success, exit retry loop
+                                                }
+                                                else if (scyResult == MegaDumper.ScyllaError.ProcessOpenFailed)
+                                                {
+                                                    // Process is gone, no point retrying
+                                                    File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                        $"  Result: {scyResult} - process not accessible, skipping retries\n");
+                                                    break;
+                                                }
+                                                else
+                                                {
+                                                    File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                        $"  Attempt {retryAttempt + 1}: {scyResult}, will retry...\n");
+                                                }
+                                            }
+                                            catch (AccessViolationException avEx)
+                                            {
+                                                // Native crash caught - log and retry
+                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+                                                    $"  Attempt {retryAttempt + 1}: AccessViolation caught ({avEx.Message}), will retry...\n");
+                                                scyResult = MegaDumper.ScyllaError.ProcessOpenFailed;
+                                            }
+                                            catch (SEHException sehEx)
+                                            {
+                                                // Structured Exception from native code
+                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+                                                    $"  Attempt {retryAttempt + 1}: SEHException caught (0x{sehEx.ErrorCode:X}), will retry...\n");
+                                                scyResult = MegaDumper.ScyllaError.IatSearchError;
+                                            }
+                                            catch (Exception scyEx)
+                                            {
+                                                // Any other exception
+                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+                                                    $"  Attempt {retryAttempt + 1}: {scyEx.GetType().Name} - {scyEx.Message}, will retry...\n");
+                                                scyResult = MegaDumper.ScyllaError.IatSearchError;
+                                            }
+
+                                            // Wait before retry
+                                            if (retryAttempt < maxRetries - 1)
+                                            {
+                                                System.Threading.Thread.Sleep(retryDelay * (retryAttempt + 1));
+                                            }
+                                        }
 
                                         if (scyResult == MegaDumper.ScyllaError.Success)
                                         {
-                                            SanitizeScyfixFile(scyFixFilename);
+                                            try
+                                            {
+                                                SanitizeScyfixFile(scyFixFilename);
+                                            }
+                                            catch (Exception sanitizeEx)
+                                            {
+                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+                                                    $"  Warning: SanitizeScyfixFile failed: {sanitizeEx.Message}\n");
+                                            }
                                         }
                                     }
                                 }

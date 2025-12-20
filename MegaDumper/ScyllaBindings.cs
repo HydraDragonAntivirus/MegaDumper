@@ -8,6 +8,7 @@
 
 using System;
 using System.Runtime.InteropServices;
+using System.Runtime.ExceptionServices;
 
 namespace MegaDumper
 {
@@ -195,6 +196,7 @@ namespace MegaDumper
         /// <param name="iatStart">Output: Start address of found IAT</param>
         /// <param name="iatSize">Output: Size of found IAT in bytes</param>
         /// <returns>ScyllaError result code</returns>
+        [HandleProcessCorruptedStateExceptions]
         public static ScyllaError IatSearch(
             uint processId,
             ulong imageBase,
@@ -237,6 +239,11 @@ namespace MegaDumper
             {
                 Console.WriteLine("[Scylla] AccessViolationException in IatSearch - process may have exited or memory is invalid");
                 return ScyllaError.ProcessOpenFailed;
+            }
+            catch (SEHException sehEx)
+            {
+                Console.WriteLine($"[Scylla] SEHException in IatSearch (0x{sehEx.ErrorCode:X}) - native code crashed");
+                return ScyllaError.IatSearchError;
             }
             catch (Exception ex)
             {
@@ -316,6 +323,7 @@ namespace MegaDumper
         /// <param name="dumpFilePath">Path to the dumped PE file</param>
         /// <param name="outputFilePath">Path for the fixed output file</param>
         /// <returns>ScyllaError result code</returns>
+        [HandleProcessCorruptedStateExceptions]
         public static ScyllaError IatFix(
             uint processId,
             ulong imageBase,
@@ -338,6 +346,13 @@ namespace MegaDumper
                     return ScyllaError.IatWriteError;
                 }
                 
+                // Check if process is still accessible
+                if (!IsProcessAccessible(processId))
+                {
+                    Console.WriteLine($"[Scylla] Process {processId} is not accessible - skipping IAT fix");
+                    return ScyllaError.ProcessOpenFailed;
+                }
+                
                 int result = IntPtr.Size == 8
                     ? ScyllaIatFixAutoW_x64(processId, (UIntPtr)imageBase, (UIntPtr)iatAddress, iatSize, createNewIat, dumpFilePath, outputFilePath)
                     : ScyllaIatFixAutoW_x86(processId, (UIntPtr)imageBase, (UIntPtr)iatAddress, iatSize, createNewIat, dumpFilePath, outputFilePath);
@@ -348,6 +363,11 @@ namespace MegaDumper
             {
                 Console.WriteLine("[Scylla] AccessViolationException in IatFix - process may have exited or memory is invalid");
                 return ScyllaError.ProcessOpenFailed;
+            }
+            catch (SEHException sehEx)
+            {
+                Console.WriteLine($"[Scylla] SEHException in IatFix (0x{sehEx.ErrorCode:X}) - native code crashed");
+                return ScyllaError.IatWriteError;
             }
             catch (Exception ex)
             {
@@ -364,15 +384,34 @@ namespace MegaDumper
         /// <param name="updateChecksum">Update the PE header checksum</param>
         /// <param name="createBackup">Create a backup before modifying</param>
         /// <returns>True if successful</returns>
+        [HandleProcessCorruptedStateExceptions]
         public static bool RebuildFile(
             string filePath,
             bool removeDosStub = false,
             bool updateChecksum = true,
             bool createBackup = false)
         {
-            return IntPtr.Size == 8
-                ? ScyllaRebuildFileW_x64(filePath, removeDosStub, updateChecksum, createBackup)
-                : ScyllaRebuildFileW_x86(filePath, removeDosStub, updateChecksum, createBackup);
+            try
+            {
+                return IntPtr.Size == 8
+                    ? ScyllaRebuildFileW_x64(filePath, removeDosStub, updateChecksum, createBackup)
+                    : ScyllaRebuildFileW_x86(filePath, removeDosStub, updateChecksum, createBackup);
+            }
+            catch (AccessViolationException)
+            {
+                Console.WriteLine("[Scylla] AccessViolationException in RebuildFile");
+                return false;
+            }
+            catch (SEHException sehEx)
+            {
+                Console.WriteLine($"[Scylla] SEHException in RebuildFile (0x{sehEx.ErrorCode:X})");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Scylla] Exception in RebuildFile: {ex.Message}");
+                return false;
+            }
         }
 
         /// <summary>
@@ -384,6 +423,7 @@ namespace MegaDumper
         /// <param name="outputPath">Output file path</param>
         /// <param name="inputFilePath">Optional input file path (null to dump from memory)</param>
         /// <returns>True if successful</returns>
+        [HandleProcessCorruptedStateExceptions]
         public static bool DumpProcess(
             uint processId,
             ulong imageBase,
@@ -391,9 +431,34 @@ namespace MegaDumper
             string outputPath,
             string inputFilePath = null)
         {
-            return IntPtr.Size == 8
-                ? ScyllaDumpProcessW_x64((UIntPtr)processId, inputFilePath, (UIntPtr)imageBase, (UIntPtr)entryPoint, outputPath)
-                : ScyllaDumpProcessW_x86((UIntPtr)processId, inputFilePath, (UIntPtr)imageBase, (UIntPtr)entryPoint, outputPath);
+            try
+            {
+                // Check if process is accessible before attempting dump
+                if (!IsProcessAccessible(processId))
+                {
+                    Console.WriteLine($"[Scylla] Process {processId} is not accessible - skipping dump");
+                    return false;
+                }
+                
+                return IntPtr.Size == 8
+                    ? ScyllaDumpProcessW_x64((UIntPtr)processId, inputFilePath, (UIntPtr)imageBase, (UIntPtr)entryPoint, outputPath)
+                    : ScyllaDumpProcessW_x86((UIntPtr)processId, inputFilePath, (UIntPtr)imageBase, (UIntPtr)entryPoint, outputPath);
+            }
+            catch (AccessViolationException)
+            {
+                Console.WriteLine("[Scylla] AccessViolationException in DumpProcess");
+                return false;
+            }
+            catch (SEHException sehEx)
+            {
+                Console.WriteLine($"[Scylla] SEHException in DumpProcess (0x{sehEx.ErrorCode:X})");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Scylla] Exception in DumpProcess: {ex.Message}");
+                return false;
+            }
         }
 
         /// <summary>

@@ -1,12 +1,13 @@
 /*
  * ScyllaBindings.cs
  * Final fixed version for Scylla Import Reconstruction DLL (x64)
- * Fully protected with try-catch and correct signatures.
+ * Protected with CSE attributes and uint-based marshaling for .NET 8.
  */
 
 using System;
 using System.Runtime.InteropServices;
 using System.IO;
+using System.Runtime.ExceptionServices;
 
 namespace MegaDumper
 {
@@ -48,6 +49,7 @@ namespace MegaDumper
         [DllImport("Scylla.dll", EntryPoint = "ScyllaVersionInformationW", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
         private static extern IntPtr ScyllaVersionInformationW_x64();
 
+        // PID is DWORD (4 bytes), advancedSearch is BOOL (4 bytes)
         [DllImport("Scylla.dll", EntryPoint = "ScyllaIatSearch", CallingConvention = CallingConvention.StdCall)]
         private static extern int ScyllaIatSearch_x64(
             uint dwProcessId,
@@ -55,29 +57,29 @@ namespace MegaDumper
             out UIntPtr iatStart,
             out uint iatSize,
             UIntPtr searchStart,
-            [MarshalAs(UnmanagedType.Bool)] bool advancedSearch);
+            uint advancedSearch);
 
+        // PID is DWORD (4 bytes)
         [DllImport("Scylla.dll", EntryPoint = "ScyllaIatFixAutoW", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
         private static extern int ScyllaIatFixAutoW_x64(
             uint dwProcessId,
             UIntPtr imagebase,
             UIntPtr iatAddr,
             uint iatSize,
-            [MarshalAs(UnmanagedType.Bool)] bool createNewIat,
+            uint createNewIat,
             [MarshalAs(UnmanagedType.LPWStr)] string dumpFile,
             [MarshalAs(UnmanagedType.LPWStr)] string iatFixFile);
 
         [DllImport("Scylla.dll", EntryPoint = "ScyllaRebuildFileW", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool ScyllaRebuildFileW_x64(
+        private static extern uint ScyllaRebuildFileW_x64(
             [MarshalAs(UnmanagedType.LPWStr)] string fileToRebuild,
-            [MarshalAs(UnmanagedType.Bool)] bool removeDosStub,
-            [MarshalAs(UnmanagedType.Bool)] bool updatePeHeaderChecksum,
-            [MarshalAs(UnmanagedType.Bool)] bool createBackup);
+            uint removeDosStub,
+            uint updatePeHeaderChecksum,
+            uint createBackup);
 
+        // PID is DWORD_PTR (8 bytes on x64)
         [DllImport("Scylla.dll", EntryPoint = "ScyllaDumpProcessW", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool ScyllaDumpProcessW_x64(
+        private static extern uint ScyllaDumpProcessW_x64(
             UIntPtr pid,
             [MarshalAs(UnmanagedType.LPWStr)] string fileToDump,
             UIntPtr imagebase,
@@ -91,26 +93,32 @@ namespace MegaDumper
             try { return Marshal.PtrToStringUni(ScyllaVersionInformationW_x64()); } catch { return null; }
         }
 
+        [HandleProcessCorruptedStateExceptions]
+        [System.Security.SecurityCritical]
         public static int IatSearch(uint processId, ulong imageBase, out UIntPtr iatStart, out uint iatSize, ulong searchStart, bool advancedSearch)
         {
              iatStart = UIntPtr.Zero;
              iatSize = 0;
              try {
-                return ScyllaIatSearch_x64(processId, (UIntPtr)imageBase, out iatStart, out iatSize, (UIntPtr)searchStart, advancedSearch);
+                return ScyllaIatSearch_x64(processId, (UIntPtr)imageBase, out iatStart, out iatSize, (UIntPtr)searchStart, advancedSearch ? 1u : 0u);
              } catch { return (int)ScyllaError.IatSearchError; }
         }
 
+        [HandleProcessCorruptedStateExceptions]
+        [System.Security.SecurityCritical]
         public static ScyllaError IatFix(uint processId, ulong imageBase, UIntPtr iatStart, uint iatSize, bool createNewIat, string dumpFilePath, string outputFilePath)
         {
              try {
-                return (ScyllaError)ScyllaIatFixAutoW_x64(processId, (UIntPtr)imageBase, iatStart, iatSize, createNewIat, dumpFilePath, outputFilePath);
+                return (ScyllaError)ScyllaIatFixAutoW_x64(processId, (UIntPtr)imageBase, iatStart, iatSize, createNewIat ? 1u : 0u, dumpFilePath, outputFilePath);
              } catch { return ScyllaError.IatWriteError; }
         }
 
+        [HandleProcessCorruptedStateExceptions]
+        [System.Security.SecurityCritical]
         public static bool RebuildFile(string filePath, bool removeDosStub, bool updatePeHeaderChecksum, bool createBackup)
         {
              try {
-                return ScyllaRebuildFileW_x64(filePath, removeDosStub, updatePeHeaderChecksum, createBackup);
+                return ScyllaRebuildFileW_x64(filePath, removeDosStub ? 1u : 0u, updatePeHeaderChecksum ? 1u : 0u, createBackup ? 1u : 0u) != 0;
              } catch { return false; }
         }
 
@@ -126,6 +134,8 @@ namespace MegaDumper
             return FixImportsAutoX64(processId, imageBase, entryPoint, dumpFilePath, outputFilePath, advancedSearch, createNewIat);
         }
 
+        [HandleProcessCorruptedStateExceptions]
+        [System.Security.SecurityCritical]
         public static ScyllaError FixImportsAutoX64(
             uint processId,
             ulong imageBase,
@@ -140,12 +150,12 @@ namespace MegaDumper
                 UIntPtr outIatStart;
                 uint outIatSize;
                 
-                int searchResult = ScyllaIatSearch_x64(processId, (UIntPtr)imageBase, out outIatStart, out outIatSize, (UIntPtr)entryPoint, advancedSearch);
+                int searchResult = IatSearch(processId, imageBase, out outIatStart, out outIatSize, entryPoint, advancedSearch);
                 
                 if (searchResult != 0) return (ScyllaError)searchResult;
                 if (outIatSize == 0) return ScyllaError.IatNotFound;
                 
-                return (ScyllaError)ScyllaIatFixAutoW_x64(processId, (UIntPtr)imageBase, outIatStart, outIatSize, createNewIat, dumpFilePath, outputFilePath);
+                return IatFix(processId, imageBase, outIatStart, outIatSize, createNewIat, dumpFilePath, outputFilePath);
             }
             catch (Exception ex)
             {
@@ -154,11 +164,13 @@ namespace MegaDumper
             }
         }
 
+        [HandleProcessCorruptedStateExceptions]
+        [System.Security.SecurityCritical]
         public static bool DumpProcessX64(uint processId, ulong imageBase, ulong entryPoint, string outputPath, string inputFilePath = null)
         {
             try
             {
-                return ScyllaDumpProcessW_x64((UIntPtr)processId, inputFilePath, (UIntPtr)imageBase, (UIntPtr)entryPoint, outputPath);
+                return ScyllaDumpProcessW_x64((UIntPtr)processId, inputFilePath, (UIntPtr)imageBase, (UIntPtr)entryPoint, outputPath) != 0;
             }
             catch { return false; }
         }

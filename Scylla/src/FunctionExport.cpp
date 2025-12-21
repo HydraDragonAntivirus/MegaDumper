@@ -206,11 +206,14 @@ int WINAPI ScyllaIatSearch(DWORD dwProcessId, DWORD_PTR imagebase,
                      ProcessAccessHelp::moduleList.cend(),
                      [&](auto& mod) { return mod.modBaseAddr == imagebase; });
     if (module_it == ProcessAccessHelp::moduleList.cend()) {
-      return SCY_ERROR_MODULENOTFOUND;
+      // Hidden module bypass with SAFE size detection
+      ProcessAccessHelp::targetImageBase = imagebase;
+      ProcessAccessHelp::targetSizeOfImage = ProcessAccessHelp::getSizeOfImageProcess(ProcessAccessHelp::hProcess, imagebase);
+      if (ProcessAccessHelp::targetSizeOfImage == 0) ProcessAccessHelp::targetSizeOfImage = 0x2000000; // 32MB Fallback
+    } else {
+      ProcessAccessHelp::targetImageBase = module_it->modBaseAddr;
+      ProcessAccessHelp::targetSizeOfImage = module_it->modBaseSize;
     }
-
-    ProcessAccessHelp::targetImageBase = module_it->modBaseAddr;
-    ProcessAccessHelp::targetSizeOfImage = module_it->modBaseSize;
   }
 
   apiReader.readApisFromModuleList();
@@ -277,11 +280,14 @@ int WINAPI ScyllaIatFixAutoW(DWORD dwProcessId, DWORD_PTR imagebase,
                      ProcessAccessHelp::moduleList.cend(),
                      [&](auto& mod) { return mod.modBaseAddr == imagebase; });
     if (module_it == ProcessAccessHelp::moduleList.cend()) {
-      return SCY_ERROR_MODULENOTFOUND;
+      // Hidden module bypass with SAFE size detection
+      ProcessAccessHelp::targetImageBase = imagebase;
+      ProcessAccessHelp::targetSizeOfImage = ProcessAccessHelp::getSizeOfImageProcess(ProcessAccessHelp::hProcess, imagebase);
+      if (ProcessAccessHelp::targetSizeOfImage == 0) ProcessAccessHelp::targetSizeOfImage = 0x2000000; // 32MB Fallback
+    } else {
+      ProcessAccessHelp::targetImageBase = module_it->modBaseAddr;
+      ProcessAccessHelp::targetSizeOfImage = module_it->modBaseSize;
     }
-
-    ProcessAccessHelp::targetImageBase = module_it->modBaseAddr;
-    ProcessAccessHelp::targetSizeOfImage = module_it->modBaseSize;
   }
 
   apiReader.readApisFromModuleList();
@@ -290,6 +296,9 @@ int WINAPI ScyllaIatFixAutoW(DWORD dwProcessId, DWORD_PTR imagebase,
 
   // add IAT section to dump
   ImportRebuilder importRebuild(dumpFile);
+  // FIX: Force Output ImageBase to match Runtime Base (prevents crash on hidden modules)
+  importRebuild.setImageBase(ProcessAccessHelp::targetImageBase);
+  
   IATReferenceScan iatReferenceScan{};
   importRebuild.enableOFTSupport();
   if (createNewIat) {

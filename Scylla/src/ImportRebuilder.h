@@ -28,6 +28,7 @@ public:
 	bool rebuildImportTable(const WCHAR * newFilePath, std::map<DWORD_PTR, ImportModuleThunk> & moduleList);
 	void enableOFTSupport();
 	void enableNewIatInSection(DWORD_PTR iatAddress, DWORD iatSize);
+	void setImageBase(DWORD_PTR ib) { moduleBaseAddress = ib; }
 
 	IATReferenceScan * iatReferenceScan;
 	bool BuildDirectImportsJumpTable;

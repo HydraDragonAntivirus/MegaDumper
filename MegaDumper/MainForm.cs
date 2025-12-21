@@ -2679,12 +2679,41 @@ namespace Mega_Dumper
                     {
                         if (MegaDumper.ScyllaBindings.IsAvailable)
                         {
-                            foreach (string dumpedFile in sessionDumpedFiles)
+                            // DEBUG: Log the path of the loaded Scylla.dll
+                            try {
+                                foreach (System.Diagnostics.ProcessModule mod in System.Diagnostics.Process.GetCurrentProcess().Modules) {
+                                    if (mod.ModuleName.Equals("Scylla.dll", StringComparison.OrdinalIgnoreCase)) {
+                                          File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), $"[DEBUG] Loaded Scylla.dll from: {mod.FileName}\n");
+                                          break;
+                                    }
+                                }
+                            } catch {}
+
+                            // Collect all files to process
+                            HashSet<string> filesToScylla = new HashSet<string>(sessionDumpedFiles);
+
+                            // Recursively scan the entire dumps directory structure to find any untracked rawdumps
+                            try {
+                                if (Directory.Exists(ddirs.dumps)) {
+                                    foreach (var f in Directory.GetFiles(ddirs.dumps, "rawdump_*.*", SearchOption.AllDirectories)) {
+                                        filesToScylla.Add(f);
+                                    }
+                                }
+                            } catch {}
+
+                            foreach (string dumpedFile in filesToScylla)
                             {
+                                if (!File.Exists(dumpedFile)) continue;
                                 try
                                 {
-                                    // Filename format: rawdump_ADDRESS.exe
+                                    // Filename format: rawdump_ADDRESS.exe or vdump_ADDRESS.exe
                                     string fileNameNoExt = Path.GetFileNameWithoutExtension(dumpedFile);
+                                    
+                                    // Only process rawdumps - skip vdumps (same ImageBase, redundant)
+                                    if (!fileNameNoExt.StartsWith("rawdump", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        continue;
+                                    }
                                     
                                     // Update UI with progress
                                     this.Invoke((MethodInvoker)delegate {
@@ -2739,7 +2768,7 @@ namespace Mega_Dumper
                                             // CRITICAL FIX: Patch FileAlignment to match SectionAlignment.
                                             uint sectionAlignment = BitConverter.ToUInt32(header, optHeaderOffset + 32);
                                             uint fileAlignment = BitConverter.ToUInt32(header, optHeaderOffset + 36);
-
+                                            
                                             if (fileAlignment != sectionAlignment)
                                             {
                                                 byte[] alignBytes = BitConverter.GetBytes(sectionAlignment);
@@ -2899,15 +2928,21 @@ namespace Mega_Dumper
 
                                         // FALLBACK STRATEGY: Scylla Native Dump
                                         // Skip fallbacks for:
-                                        // - ModuleNotFound: Module isn't in process list, fallbacks will also fail
-                                        // - IatSearchError after 3 attempts: If standard search failed 3 times, fallbacks won't help
-                                        bool skipFallbacks = (scyResult == MegaDumper.ScyllaError.ModuleNotFound) ||
+                                        // - PidNotFound: Process is dead
+                                        // - ModuleNotFound: Module isn't in process list
+                                        // - IatSearchError: Standard search failed
+                                        bool skipFallbacks = (scyResult == MegaDumper.ScyllaError.PidNotFound) ||
+                                                            (scyResult == MegaDumper.ScyllaError.ModuleNotFound) ||
                                                             (scyResult == MegaDumper.ScyllaError.IatSearchError);
                                         
                                         if (skipFallbacks && scyResult != MegaDumper.ScyllaError.Success)
                                         {
-                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                $"  Skipping fallbacks for {scyResult} - would also fail.\n");
+                                            // Don't log for PidNotFound - already logged above
+                                            if (scyResult != MegaDumper.ScyllaError.PidNotFound)
+                                            {
+                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                    $"  Skipping fallbacks for {scyResult}\n");
+                                            }
                                         }
                                         
                                         if (scyResult != MegaDumper.ScyllaError.Success && !skipFallbacks)
@@ -3044,6 +3079,54 @@ namespace Mega_Dumper
 
                     renameFiles(ddirs.dumps, ddirs.dumps);
                     renameFiles(ddirs.nativedirname, ddirs.nativedirname);
+
+                    // PASS 2: Scylla for UnknownName AND Main Dumps files (Post-Rename)
+                    // Captures files that were moved or left behind and potentially missed in Pass 1
+                    try
+                    {
+                        if (MegaDumper.ScyllaBindings.IsAvailable)
+                        {
+                             var dirsToScan = new List<string>();
+                             if (Directory.Exists(ddirs.unknowndirname)) dirsToScan.Add(ddirs.unknowndirname);
+                             if (Directory.Exists(ddirs.dumps)) dirsToScan.Add(ddirs.dumps);
+
+                             foreach (var dir in dirsToScan)
+                             {
+                                 foreach (string dumpedFile in Directory.GetFiles(dir, "rawdump_*.*"))
+                                 {
+                                 try
+                                 {
+                                     // Skip if already processed (check for _scyfix)
+                                     string checkScyfix = Path.ChangeExtension(dumpedFile, null) + "_scyfix" + Path.GetExtension(dumpedFile);
+                                     if (File.Exists(checkScyfix)) continue;
+
+                                     string fileNameNoExt = Path.GetFileNameWithoutExtension(dumpedFile);
+                                     string hexAddress = fileNameNoExt.Split('_').Last();
+                                     ulong imageBase = Convert.ToUInt64(hexAddress, 16);
+                                     
+                                     if (imageBase > 0)
+                                     {
+                                          // Pass 2: We use ImageBase as OEP since we lost the specific OEP context.
+                                          // This is sufficient for many rawdumps.
+                                          MegaDumper.ScyllaError scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
+                                                processId,
+                                                imageBase,
+                                                imageBase, 
+                                                dumpedFile,
+                                                checkScyfix,
+                                                advancedSearch: false,
+                                                createNewIat: true);
+                                          
+                                          File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                              $"[Pass 2] {fileNameNoExt}: {scyResult}\n");
+                                     }
+                                 }
+                                 catch {}
+                             }
+                         }
+                        }
+                    }
+                    catch {}
 
 
                 }

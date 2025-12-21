@@ -2,7 +2,9 @@
     "runtimeOptions": {
         "configProperties": {
             "System.GC.Concurrent": true,
-            "System.Runtime.LegacyCorruptedStateExceptionsPolicy": true
+            "System.Runtime.LegacyCorruptedStateExceptionsPolicy": true,
+            "System.Runtime.InteropServices.BuiltInComInterop.IsSupported": true,
+            "System.Runtime.InteropServices.EnableBuiltInMarshalling": true
         }
     }
 }

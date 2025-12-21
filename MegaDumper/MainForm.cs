@@ -839,9 +839,20 @@ namespace Mega_Dumper
                         if (numberOfSections <= 0 || numberOfSections > 96)
                             return false;
 
-                        // Validate optional header size
-                        if (sizeOfOptionalHeader < 224) // Minimum size for PE32
-                            return false;
+                        // Validate optional header magic and size
+                        ushort optHeaderMagic = BitConverter.ToUInt16(peHeaders, 24);
+                        if (optHeaderMagic == 0x10B) // PE32
+                        {
+                            if (sizeOfOptionalHeader < 224) return false;
+                        }
+                        else if (optHeaderMagic == 0x20B) // PE32+
+                        {
+                            if (sizeOfOptionalHeader < 240) return false;
+                        }
+                        else
+                        {
+                            return false; // Unknown magic
+                        }
 
                         // Check if it's an executable image
                         if ((characteristics & 0x0002) == 0) // IMAGE_FILE_EXECUTABLE_IMAGE not set
@@ -2300,24 +2311,27 @@ namespace Mega_Dumper
                                                 if (numberOfSections <= 0 || numberOfSections >= 100)
                                                     continue;
 
-                                                // Now call CheckAdvancedPEStructure with the correct PE header offset
+                                                // Restore CheckAdvancedPEStructure call to get isNetAssembly status
+                                                isNetAssembly = false;
                                                 try
                                                 {
-                                                    // pass the image base and e_lfanew so the checker knows where the header lives
                                                     isNetAssembly = CheckAdvancedPEStructure(hProcess, (j + (ulong)k), e_lfanew);
                                                 }
-                                                catch (System.ComponentModel.Win32Exception)
-                                                {
-                                                    isNetAssembly = false;
-                                                }
-                                                catch
-                                                {
-                                                    isNetAssembly = false;
-                                                }
+                                                catch { isNetAssembly = false; }
+
+                                                // Determine architecture and correct Metadata offset
+                                                ushort magic = 0;
+                                                // Read Magic bytes (PE Signature + 24 bytes = offset 24 in NT header)
+                                                if (ReadProcessMemoryW(hProcess, (j + (ulong)k + (ulong)PEOffset + 24UL), infokeep, (UIntPtr)2, out BytesRead))
+                                                    magic = BitConverter.ToUInt16(infokeep, 0);
+
+                                                bool isPE64 = (magic == 0x20B);
+                                                int metadataOffset = isPE64 ? 0x0F8 : 0x0E8;
+                                                int sectionTableOffset = isPE64 ? 0x108 : 0x0F8;
 
                                                 long NetMetadata = 0;
-                                                // read 8 bytes at CLR metadata pointer (j + k + PEOffset + 0x0E8)
-                                                ulong netMetaAddr = j + (ulong)k + (ulong)PEOffset + 0x0E8UL;
+                                                // read 8 bytes at CLR metadata pointer
+                                                ulong netMetaAddr = j + (ulong)k + (ulong)PEOffset + (ulong)metadataOffset;
                                                 if (ReadProcessMemoryW(hProcess, netMetaAddr, infokeep, (UIntPtr)8, out BytesRead))
                                                     NetMetadata = BitConverter.ToInt64(infokeep, 0);
 
@@ -2399,8 +2413,8 @@ namespace Mega_Dumper
                                                         int sizeofimage = BitConverter.ToInt32(PeHeader, PEOffset + 0x050);
 
                                                         // CHANGE: Correctly initialize calculatedimagesize from PE Header's SizeOfHeaders field.
-                                                        // The original line was reading from an incorrect offset and was a likely source of errors.
-                                                        int sizeOfHeaders = BitConverter.ToInt32(PeHeader, PEOffset + 0x5C);
+                                                        // Offset 60 from OptionalHeader start (24) = 84 (0x54)
+                                                        int sizeOfHeaders = BitConverter.ToInt32(PeHeader, PEOffset + 0x54);
                                                         int calculatedimagesize = sizeOfHeaders;
 
                                                         int rawsize, rawAddress, virtualsize, virtualAddress = 0;
@@ -2438,9 +2452,9 @@ namespace Mega_Dumper
                                                                     if (isNetFile)
                                                                         dumpdir = ddirs.dumps;
 
-                                                                    filename = dumpdir + "\\rawdump_" + (j + (ulong)k).ToString("X8");
+                                                                    filename = dumpdir + "\\rawdump_" + (j + (ulong)k).ToString("X");
                                                                     if (File.Exists(filename))
-                                                                        filename = dumpdir + "\\rawdump" + CurrentCount.ToString() + "_" + (j + (ulong)k).ToString("X8");
+                                                                        filename = dumpdir + "\\rawdump" + CurrentCount.ToString() + "_" + (j + (ulong)k).ToString("X");
 
                                                                     if (IsDll)
                                                                         filename += ".dll";
@@ -2491,9 +2505,10 @@ namespace Mega_Dumper
                                                                 rawsize = virtualsize;
                                                                 rawAddress = virtualAddress;
                                                                 BinaryWriter writer = new(new MemoryStream(virtualdump));
-                                                                writer.BaseStream.Position = PEOffset + 0x0F8 + (0x28 * l) + 16;
+                                                                // FIX: Use dynamic sectionTableOffset instead of hardcoded 0xF8
+                                                                writer.BaseStream.Position = PEOffset + sectionTableOffset + (0x28 * l) + 16;
                                                                 writer.Write(virtualsize);
-                                                                writer.BaseStream.Position = PEOffset + 0x0F8 + (0x28 * l) + 20;
+                                                                writer.BaseStream.Position = PEOffset + sectionTableOffset + (0x28 * l) + 20;
                                                                 writer.Write(virtualAddress);
                                                                 writer.Close();
                                                             }
@@ -2898,14 +2913,31 @@ namespace Mega_Dumper
 
                                             if (scyResult != MegaDumper.ScyllaError.PidNotFound)
                                             {
+                                                // Strategy: Try Advanced Search by default
                                                 scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
                                                     processId,
                                                     imageBase,
                                                     finalEntryPoint,
                                                     dumpedFile,
                                                     scyFixFilename,
-                                                    advancedSearch: false,
+                                                    advancedSearch: true,
                                                     createNewIat: true);
+                                                
+                                                // If Thread-based OEP failed or crashed, try Header-based EP as fallback
+                                                if (scyResult != MegaDumper.ScyllaError.Success && finalEntryPoint != entryPoint)
+                                                {
+                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                        $"  Scylla failed with result {scyResult} using Thread OEP. Retrying with Header EP...\n");
+                                                        
+                                                     scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
+                                                        processId,
+                                                        imageBase,
+                                                        entryPoint,
+                                                        dumpedFile,
+                                                        scyFixFilename,
+                                                        advancedSearch: true,
+                                                        createNewIat: true);
+                                                }
                                                 
                                                 if (scyResult == MegaDumper.ScyllaError.Success)
                                                 {

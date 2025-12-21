@@ -2685,6 +2685,12 @@ namespace Mega_Dumper
                                 {
                                     // Filename format: rawdump_ADDRESS.exe
                                     string fileNameNoExt = Path.GetFileNameWithoutExtension(dumpedFile);
+                                    
+                                    // Update UI with progress
+                                    this.Invoke((MethodInvoker)delegate {
+                                        this.Text = $"Scylla fixing: {fileNameNoExt}...";
+                                    });
+
                                     string hexAddress = fileNameNoExt.Split('_').Last();
                                     
                                     ulong imageBase = Convert.ToUInt64(hexAddress, 16);
@@ -2838,86 +2844,73 @@ namespace Mega_Dumper
                                             // Let's assume Thread finding works for unpacked apps.
                                         }
 
-                                        // Scylla call with retry logic for memory reconstruction
+                                        // Single Scylla attempt - no retries
                                         MegaDumper.ScyllaError scyResult = MegaDumper.ScyllaError.IatSearchError;
-                                        int maxRetries = 3;
-                                        int retryDelay = 100; // ms
                                         
-                                        for (int retryAttempt = 0; retryAttempt < maxRetries; retryAttempt++)
+                                        try
                                         {
+                                            // Check if process is still alive
                                             try
                                             {
-                                                // Re-check if process is still alive before each attempt
-                                                try
+                                                using (var checkProc = System.Diagnostics.Process.GetProcessById((int)processId))
                                                 {
-                                                    using (var checkProc = System.Diagnostics.Process.GetProcessById((int)processId))
+                                                    if (checkProc.HasExited)
                                                     {
-                                                        if (checkProc.HasExited)
-                                                        {
-                                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
-                                                                $"[{DateTime.Now}] Process exited, skipping Scylla fix.\n");
-                                                            break;
-                                                        }
+                                                        File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+                                                            $"[{DateTime.Now}] Process exited, skipping Scylla fix.\n");
+                                                        scyResult = MegaDumper.ScyllaError.PidNotFound;
                                                     }
                                                 }
-                                                catch
-                                                {
-                                                    // Process no longer accessible
-                                                    break;
-                                                }
+                                            }
+                                            catch
+                                            {
+                                                scyResult = MegaDumper.ScyllaError.PidNotFound;
+                                            }
 
-                                                // Fallback: If 1st attempt (OEP) failed, try ImageBase on subsequent attempts.
-                                                // This helps if OEP is in shellcode (outside module) causing ModuleNotFound.
-                                                ulong currentSearchStart = (retryAttempt == 0) ? finalEntryPoint : imageBase;
-
+                                            if (scyResult != MegaDumper.ScyllaError.PidNotFound)
+                                            {
                                                 scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
                                                     processId,
                                                     imageBase,
-                                                    currentSearchStart,
+                                                    finalEntryPoint,
                                                     dumpedFile,
                                                     scyFixFilename,
-                                                    advancedSearch: true,
+                                                    advancedSearch: false,
                                                     createNewIat: true);
                                                 
                                                 if (scyResult == MegaDumper.ScyllaError.Success)
                                                 {
                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                        $"  Result: {scyResult} (attempt {retryAttempt + 1}, Start=0x{currentSearchStart:X})\n");
-                                                    break; // Success, exit retry loop
-                                                }
-                                                else if (scyResult == MegaDumper.ScyllaError.IatNotFound)
-                                                {
-                                                    // IAT not found - might succeed with different entry point
-                                                    File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                        $"  Result: {scyResult} - IAT not found at this entry point, skipping\n");
-                                                    break;
+                                                        $"  Result: Success\n");
                                                 }
                                                 else
                                                 {
                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                        $"  Attempt {retryAttempt + 1}: {scyResult}, will continue to fallbacks...\n");
+                                                        $"  Result: {scyResult}\n");
                                                 }
                                             }
-                                            catch (Exception scyEx)
-                                            {
-                                                // Any other non-corrupted state exception
-                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
-                                                    $"  Attempt {retryAttempt + 1}: {scyEx.GetType().Name} - {scyEx.Message}, will retry...\n");
-                                                scyResult = MegaDumper.ScyllaError.IatSearchError;
-                                            }
-
-                                            // Wait before retry
-                                            if (retryAttempt < maxRetries - 1)
-                                            {
-                                                System.Threading.Thread.Sleep(retryDelay * (retryAttempt + 1));
-                                            }
+                                        }
+                                        catch (Exception scyEx)
+                                        {
+                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+                                                $"  Exception: {scyEx.GetType().Name} - {scyEx.Message}\n");
+                                            scyResult = MegaDumper.ScyllaError.IatSearchError;
                                         }
 
                                         // FALLBACK STRATEGY: Scylla Native Dump
-                                        // If standard fix failed (likely ModuleNotFound on hidden module), 
-                                        // try asking Scylla to dump it natively. If Scylla creates its own dump,
-                                        // it sometimes handles hidden modules better when searching for IAT.
-                                        if (scyResult != MegaDumper.ScyllaError.Success)
+                                        // Skip fallbacks for:
+                                        // - ModuleNotFound: Module isn't in process list, fallbacks will also fail
+                                        // - IatSearchError after 3 attempts: If standard search failed 3 times, fallbacks won't help
+                                        bool skipFallbacks = (scyResult == MegaDumper.ScyllaError.ModuleNotFound) ||
+                                                            (scyResult == MegaDumper.ScyllaError.IatSearchError);
+                                        
+                                        if (skipFallbacks && scyResult != MegaDumper.ScyllaError.Success)
+                                        {
+                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                $"  Skipping fallbacks for {scyResult} - would also fail.\n");
+                                        }
+                                        
+                                        if (scyResult != MegaDumper.ScyllaError.Success && !skipFallbacks)
                                         {
                                             File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
                                                 "  Standard fix failed. Attempting Scylla Native Dump Fallback...\n");
@@ -2960,9 +2953,8 @@ namespace Mega_Dumper
                                         }
 
                                         // FINAL FALLBACK: Manual IAT Recovery from PE Header
-                                        // If everything else fails (likely ModuleNotFound on hidden/unlinked module),
-                                        // we manually parse the dumped PE header to find the IAT.
-                                        if (scyResult != MegaDumper.ScyllaError.Success)
+                                        // Skip this too if ModuleNotFound - manual IAT fix also needs module in process list.
+                                        if (scyResult != MegaDumper.ScyllaError.Success && !skipFallbacks)
                                         {
                                             File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
                                                 "  Native dump failed or not enough. Attempting Manual IAT Recovery from Header...\n");
@@ -3043,7 +3035,9 @@ namespace Mega_Dumper
                         }
                         else
                         {
-                             System.Windows.Forms.MessageBox.Show($"Scylla is NOT Available!\nReason: {MegaDumper.ScyllaBindings.LastLoadError}\n\nCheck if the CORRECT DLL ({(IntPtr.Size == 8 ? "Scylla.dll" : "Scylla_x86.dll")}) is in the folder.", "Scylla Error", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
+                             // REPLACED background MessageBox with logging to prevent deadlocks
+                             File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                 $"[{DateTime.Now}] Scylla is NOT Available! Error: {MegaDumper.ScyllaBindings.LastLoadError}\n");
                         }
                     }
                     catch {}

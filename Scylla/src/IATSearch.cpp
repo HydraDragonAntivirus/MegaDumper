@@ -39,10 +39,23 @@ bool IATSearch::findIATAdvanced( DWORD_PTR startAddress, DWORD_PTR* addressIAT, 
 	DWORD_PTR baseAddress;
 	SIZE_T memorySize;
 
+	// LIMIT: Cap memory region at 50MB to prevent hanging on huge sections
+	const SIZE_T MAX_ADVANCED_SEARCH_SIZE = 50 * 1024 * 1024;
+	// LIMIT: Max iterations to prevent infinite loops
+	const DWORD MAX_DECOMPOSE_ITERATIONS = 100000;
+
 	findExecutableMemoryPagesByStartAddress(startAddress, &baseAddress, &memorySize);
 
 	if (memorySize == 0)
 		return false;
+
+	// Cap memory size to prevent excessive processing time
+	if (memorySize > MAX_ADVANCED_SEARCH_SIZE) {
+#ifdef DEBUG_COMMENTS
+		Scylla::debugLog.log(L"findIATAdvanced :: memory region too large (%zu bytes), capped to %zu", memorySize, MAX_ADVANCED_SEARCH_SIZE);
+#endif
+		memorySize = MAX_ADVANCED_SEARCH_SIZE;
+	}
 
 	dataBuffer = new BYTE[memorySize];
 
@@ -58,8 +71,17 @@ bool IATSearch::findIATAdvanced( DWORD_PTR startAddress, DWORD_PTR* addressIAT, 
 	std::set<DWORD_PTR> iatPointers;
 	DWORD_PTR next;
 	BYTE * tempBuf = dataBuffer;
+	DWORD iterationCount = 0;
 	while(decomposeMemory(tempBuf, memorySize, (DWORD_PTR)baseAddress) && decomposerInstructionsCount != 0)
 	{
+		// LIMIT: Prevent infinite loop
+		if (++iterationCount > MAX_DECOMPOSE_ITERATIONS) {
+#ifdef DEBUG_COMMENTS
+			Scylla::debugLog.log(L"findIATAdvanced :: iteration limit reached (%d), stopping", MAX_DECOMPOSE_ITERATIONS);
+#endif
+			break;
+		}
+
 		findIATPointers(iatPointers);
 
 		next = (DWORD_PTR)(decomposerResult[decomposerInstructionsCount - 1].addr - baseAddress);
@@ -488,11 +510,18 @@ void IATSearch::filterIATPointersList( std::set<DWORD_PTR> & iatPointers )
 	//delete bad code pointers.
 
 	bool erased = true;
+	DWORD filterIterations = 0;
+	const DWORD MAX_FILTER_ITERATIONS = 1000; // Prevent infinite cleanup loop
 
 	while(erased)
 	{
 		if (iatPointers.size() <= 1)
 			break;
+
+		// LIMIT: Prevent infinite loop in filter
+		if (++filterIterations > MAX_FILTER_ITERATIONS) {
+			break;
+		}
 
 		iter = iatPointers.begin();
 		lastPointer = *iter;

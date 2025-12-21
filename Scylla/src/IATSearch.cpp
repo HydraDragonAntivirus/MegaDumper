@@ -57,7 +57,11 @@ bool IATSearch::findIATAdvanced( DWORD_PTR startAddress, DWORD_PTR* addressIAT, 
 		memorySize = MAX_ADVANCED_SEARCH_SIZE;
 	}
 
-	dataBuffer = new BYTE[memorySize];
+	try {
+		dataBuffer = new BYTE[memorySize];
+	} catch (...) {
+		return false;
+	}
 
 	if (!readMemoryFromProcess((DWORD_PTR)baseAddress, memorySize,dataBuffer))
 	{
@@ -72,38 +76,52 @@ bool IATSearch::findIATAdvanced( DWORD_PTR startAddress, DWORD_PTR* addressIAT, 
 	DWORD_PTR next;
 	BYTE * tempBuf = dataBuffer;
 	DWORD iterationCount = 0;
-	while(decomposeMemory(tempBuf, memorySize, (DWORD_PTR)baseAddress) && decomposerInstructionsCount != 0)
-	{
-		// LIMIT: Prevent infinite loop
-		if (++iterationCount > MAX_DECOMPOSE_ITERATIONS) {
-#ifdef DEBUG_COMMENTS
-			Scylla::debugLog.log(L"findIATAdvanced :: iteration limit reached (%d), stopping", MAX_DECOMPOSE_ITERATIONS);
-#endif
-			break;
-		}
 
-		findIATPointers(iatPointers);
-
-		next = (DWORD_PTR)(decomposerResult[decomposerInstructionsCount - 1].addr - baseAddress);
-		next += decomposerResult[decomposerInstructionsCount - 1].size;
-		// Advance ptr and recalc offset.
-		tempBuf += next;
-
-		if (memorySize <= next)
+	try {
+		while(decomposeMemory(tempBuf, memorySize, (DWORD_PTR)baseAddress) && decomposerInstructionsCount != 0)
 		{
-			break;
+			// LIMIT: Prevent infinite loop
+			if (++iterationCount > MAX_DECOMPOSE_ITERATIONS) {
+	#ifdef DEBUG_COMMENTS
+				Scylla::debugLog.log(L"findIATAdvanced :: iteration limit reached (%d), stopping", MAX_DECOMPOSE_ITERATIONS);
+	#endif
+				break;
+			}
+
+			findIATPointers(iatPointers);
+
+			next = (DWORD_PTR)(decomposerResult[decomposerInstructionsCount - 1].addr - baseAddress);
+			next += decomposerResult[decomposerInstructionsCount - 1].size;
+			
+			// Safety check for 'next' vs remaining size
+			if (next == 0 || next > memorySize) break;
+
+			// Advance ptr and recalc offset.
+			tempBuf += next;
+
+			if (memorySize <= next)
+			{
+				break;
+			}
+			memorySize -= next;
+			baseAddress += next;
 		}
-		memorySize -= next;
-		baseAddress += next;
+	} catch (...) {
+		delete[] dataBuffer;
+		return false;
 	}
 
-	if (iatPointers.size() == 0)
+	if (iatPointers.size() == 0) {
+		delete[] dataBuffer;
 		return false;
+	}
 
 	filterIATPointersList(iatPointers);
 
-	if (iatPointers.size() == 0)
+	if (iatPointers.size() == 0) {
+		delete[] dataBuffer;
 		return false;
+	}
 
 	*addressIAT = *(iatPointers.begin());
 	*sizeIAT = (DWORD)(*(--iatPointers.end()) - *(iatPointers.begin()) + sizeof(DWORD_PTR));
@@ -113,6 +131,7 @@ bool IATSearch::findIATAdvanced( DWORD_PTR startAddress, DWORD_PTR* addressIAT, 
 	{
 		*addressIAT = 0;
 		*sizeIAT = 0;
+		delete[] dataBuffer;
 		return false;
 	}
 
@@ -243,6 +262,8 @@ DWORD_PTR IATSearch::findIATPointer()
 bool IATSearch::isIATPointerValid(DWORD_PTR iatPointer, bool checkRedirects)
 {
 	DWORD_PTR apiAddress = 0;
+
+	if (iatPointer == 0) return false;
 
 	if (!readMemoryFromProcess(iatPointer,sizeof(DWORD_PTR),&apiAddress))
 	{
@@ -444,7 +465,9 @@ void IATSearch::findExecutableMemoryPagesByStartAddress( DWORD_PTR startAddress,
 	{
 		*memorySize = memBasic.RegionSize;
 		*baseAddress = (DWORD_PTR)memBasic.BaseAddress;
-		tempAddress = (DWORD_PTR)memBasic.BaseAddress - 1;
+		
+		if (*baseAddress == 0) break; // Safety
+		tempAddress = *baseAddress - 1;
 
 		if (VirtualQueryEx(hProcess, (LPCVOID)tempAddress, &memBasic, sizeof(MEMORY_BASIC_INFORMATION)) != sizeof(MEMORY_BASIC_INFORMATION))
 		{

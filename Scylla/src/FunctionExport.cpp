@@ -169,74 +169,78 @@ INT WINAPI ScyllaStartGui(DWORD dwProcessId, HINSTANCE mod,
 int WINAPI ScyllaIatSearch(DWORD dwProcessId, DWORD_PTR imagebase,
                            DWORD_PTR* iatStart, DWORD* iatSize,
                            DWORD_PTR searchStart, BOOL advancedSearch) {
-  ApiReader apiReader;
-  ProcessLister processLister;
-  Process* processPtr = 0;
-  IATSearch iatSearch;
+  try {
+    ApiReader apiReader;
+    ProcessLister processLister;
+    Process* processPtr = 0;
+    IATSearch iatSearch;
 
-  std::vector<Process>& processList =
-      processLister.getProcessListSnapshotNative();
-  for (std::vector<Process>::iterator it = processList.begin();
-       it != processList.end(); ++it) {
-    if (it->PID == dwProcessId) {
-      processPtr = &(*it);
-      break;
+    std::vector<Process>& processList =
+        processLister.getProcessListSnapshotNative();
+    for (std::vector<Process>::iterator it = processList.begin();
+         it != processList.end(); ++it) {
+      if (it->PID == dwProcessId) {
+        processPtr = &(*it);
+        break;
+      }
     }
-  }
 
-  if (!processPtr) return SCY_ERROR_PIDNOTFOUND;
+    if (!processPtr) return SCY_ERROR_PIDNOTFOUND;
 
-  ProcessAccessHelp::closeProcessHandle();
-  apiReader.clearAll();
+    ProcessAccessHelp::closeProcessHandle();
+    apiReader.clearAll();
 
-  if (!ProcessAccessHelp::openProcessHandle(processPtr->PID)) {
-    return SCY_ERROR_PROCOPEN;
-  }
+    if (!ProcessAccessHelp::openProcessHandle(processPtr->PID)) {
+      return SCY_ERROR_PROCOPEN;
+    }
 
-  ProcessAccessHelp::getProcessModules(ProcessAccessHelp::hProcess,
-                                       ProcessAccessHelp::moduleList);
+    ProcessAccessHelp::getProcessModules(ProcessAccessHelp::hProcess,
+                                         ProcessAccessHelp::moduleList);
 
-  ProcessAccessHelp::selectedModule = 0;
-  if (imagebase == 0 || imagebase == processPtr->imageBase) {
-    ProcessAccessHelp::targetImageBase = processPtr->imageBase;
-    ProcessAccessHelp::targetSizeOfImage = processPtr->imageSize;
-  } else {
-    auto module_it =
-        std::find_if(ProcessAccessHelp::moduleList.cbegin(),
-                     ProcessAccessHelp::moduleList.cend(),
-                     [&](auto& mod) { return mod.modBaseAddr == imagebase; });
-    if (module_it == ProcessAccessHelp::moduleList.cend()) {
-      // Hidden module bypass with SAFE size detection
-      ProcessAccessHelp::targetImageBase = imagebase;
-      ProcessAccessHelp::targetSizeOfImage = ProcessAccessHelp::getSizeOfImageProcess(ProcessAccessHelp::hProcess, imagebase);
-      if (ProcessAccessHelp::targetSizeOfImage == 0) ProcessAccessHelp::targetSizeOfImage = 0x2000000; // 32MB Fallback
+    ProcessAccessHelp::selectedModule = 0;
+    if (imagebase == 0 || imagebase == processPtr->imageBase) {
+      ProcessAccessHelp::targetImageBase = processPtr->imageBase;
+      ProcessAccessHelp::targetSizeOfImage = processPtr->imageSize;
     } else {
-      ProcessAccessHelp::targetImageBase = module_it->modBaseAddr;
-      ProcessAccessHelp::targetSizeOfImage = module_it->modBaseSize;
+      auto module_it =
+          std::find_if(ProcessAccessHelp::moduleList.cbegin(),
+                       ProcessAccessHelp::moduleList.cend(),
+                       [&](auto& mod) { return mod.modBaseAddr == imagebase; });
+      if (module_it == ProcessAccessHelp::moduleList.cend()) {
+        // Hidden module bypass with SAFE size detection
+        ProcessAccessHelp::targetImageBase = imagebase;
+        ProcessAccessHelp::targetSizeOfImage = ProcessAccessHelp::getSizeOfImageProcess(ProcessAccessHelp::hProcess, imagebase);
+        if (ProcessAccessHelp::targetSizeOfImage == 0) ProcessAccessHelp::targetSizeOfImage = 0x2000000; // 32MB Fallback
+      } else {
+        ProcessAccessHelp::targetImageBase = module_it->modBaseAddr;
+        ProcessAccessHelp::targetSizeOfImage = module_it->modBaseSize;
+      }
     }
+
+    apiReader.readApisFromModuleList();
+
+    int retVal = SCY_ERROR_IATNOTFOUND;
+
+    if (advancedSearch) {
+      if (iatSearch.searchImportAddressTableInProcess(searchStart, iatStart,
+                                                      iatSize, true)) {
+        retVal = SCY_ERROR_SUCCESS;
+      }
+    } else {
+      if (iatSearch.searchImportAddressTableInProcess(searchStart, iatStart,
+                                                      iatSize, false)) {
+        retVal = SCY_ERROR_SUCCESS;
+      }
+    }
+
+    processList.clear();
+    ProcessAccessHelp::closeProcessHandle();
+    apiReader.clearAll();
+
+    return retVal;
+  } catch (...) {
+    return SCY_ERROR_IATSEARCH;
   }
-
-  apiReader.readApisFromModuleList();
-
-  int retVal = SCY_ERROR_IATNOTFOUND;
-
-  if (advancedSearch) {
-    if (iatSearch.searchImportAddressTableInProcess(searchStart, iatStart,
-                                                    iatSize, true)) {
-      retVal = SCY_ERROR_SUCCESS;
-    }
-  } else {
-    if (iatSearch.searchImportAddressTableInProcess(searchStart, iatStart,
-                                                    iatSize, false)) {
-      retVal = SCY_ERROR_SUCCESS;
-    }
-  }
-
-  processList.clear();
-  ProcessAccessHelp::closeProcessHandle();
-  apiReader.clearAll();
-
-  return retVal;
 }
 
 int WINAPI ScyllaIatFixAutoW(DWORD dwProcessId, DWORD_PTR imagebase,

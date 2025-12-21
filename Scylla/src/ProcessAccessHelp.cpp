@@ -140,7 +140,7 @@ bool ProcessAccessHelp::readMemoryPartlyFromProcess(DWORD_PTR address, SIZE_T si
 				break;
 			}
 
-			bytesToRead = memBasic.RegionSize;
+			bytesToRead = memBasic.RegionSize - (addressPart - (DWORD_PTR)memBasic.BaseAddress);
 
 			if ( (readBytes+bytesToRead) > size)
 			{
@@ -681,6 +681,7 @@ bool ProcessAccessHelp::getProcessModules(HANDLE hProcess, std::vector<ModuleInf
     bool retVal = false;
     DeviceNameResolver deviceNameResolver;
 
+    moduleList.clear();
     moduleList.reserve(20);
 
     EnumProcessModules(hProcess, 0, 0, &cbNeeded);
@@ -691,7 +692,7 @@ bool ProcessAccessHelp::getProcessModules(HANDLE hProcess, std::vector<ModuleInf
     {
         if(EnumProcessModules(hProcess, hMods, cbNeeded, &cbNeeded))
         {
-            for(unsigned int i = 1; i < (cbNeeded/sizeof(HMODULE)); i++) //skip first module!
+            for(unsigned int i = 0; i < (cbNeeded/sizeof(HMODULE)); i++)
             {
                 module.modBaseAddr = (DWORD_PTR)hMods[i];
                 module.modBaseSize = (DWORD)getSizeOfImageProcess(hProcess, module.modBaseAddr);

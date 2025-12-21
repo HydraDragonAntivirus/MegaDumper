@@ -1803,14 +1803,16 @@ namespace Mega_Dumper
 
         public bool FixImportandEntryPoint(long dumpVA, byte[] Dump)
         {
-            if (Dump == null || Dump.Length < 0x40) return false; // Minimum size for DOS header and PE offset
+            if (Dump == null || Dump.Length < 0x40) return false;
 
             int PEOffset = ReadInt32Safe(Dump, 0x3C);
-            if (PEOffset < 0 || PEOffset >= Dump.Length - 4) return false; // Ensure PEOffset itself is valid and allows for 4-byte read
+            if (PEOffset < 0 || PEOffset >= Dump.Length - 0x100) return false;
 
-            // Check for IMAGE_DIRECTORY_ENTRY_IMPORT size and offset
-            if (PEOffset + 0x080 + 4 > Dump.Length) return false;
-            int ImportDirectoryRva = ReadInt32Safe(Dump, PEOffset + 0x080);
+            // Detect architecture
+            ushort magic = BitConverter.ToUInt16(Dump, PEOffset + 24);
+            bool isPE64 = (magic == 0x20B);
+
+            int ImportDirectoryRva = ReadInt32Safe(Dump, PEOffset + (isPE64 ? 0x090 : 0x080));
             int impdiroffset = RVA2Offset(Dump, ImportDirectoryRva);
             if (impdiroffset == -1) return false;
 
@@ -1818,108 +1820,58 @@ namespace Mega_Dumper
             byte[] CorExeMain = { 0x5F, 0x43, 0x6F, 0x72, 0x45, 0x78, 0x65, 0x4D, 0x61, 0x69, 0x6E, 0x00 };
             byte[] CorDllMain = { 0x5F, 0x43, 0x6F, 0x72, 0x44, 0x6C, 0x6C, 0x4D, 0x61, 0x69, 0x6E, 0x00 };
             int ThunkToFix = 0;
-            int ThunkData = 0;
+            long ThunkData = 0;
             int current = 0;
 
-            // Loop through Import Directory Table entries (each 20 bytes)
-            // NameRVA is at offset 12 from the start of an IMAGE_IMPORT_DESCRIPTOR (which is 20 bytes)
-            while (impdiroffset + current + 12 + 4 <= Dump.Length) // Ensure we can read NameRVA
+            while (impdiroffset + current + 20 <= Dump.Length)
             {
                 int NameRVA = ReadInt32Safe(Dump, impdiroffset + current + 12);
-                if (NameRVA == -1 || NameRVA == 0) break; // End of import descriptors or invalid RVA
+                if (NameRVA <= 0) break;
 
                 int NameOffset = RVA2Offset(Dump, NameRVA);
-                if (NameOffset == -1) // Invalid NameOffset
-                {
-                    current += 20;
-                    continue;
-                }
+                if (NameOffset == -1) { current += 20; continue; }
 
-                try
+                bool ismscoree = true;
+                for (int i = 0; i < mscoreeAscii.Length; i++)
                 {
-                    bool ismscoree = true;
-                    if (NameOffset + mscoreeAscii.Length > Dump.Length) // Check bounds for mscoreeAscii comparison
+                    if (NameOffset + i >= Dump.Length || Dump[NameOffset + i] != mscoreeAscii[i])
                     {
                         ismscoree = false;
+                        break;
                     }
+                }
+
+                if (ismscoree)
+                {
+                    int OriginalFirstThunk = ReadInt32Safe(Dump, impdiroffset + current);
+                    int OriginalFirstThunkfo = RVA2Offset(Dump, OriginalFirstThunk);
+                    if (OriginalFirstThunkfo == -1) { current += 20; continue; }
+
+                    if (isPE64)
+                        ThunkData = BitConverter.ToInt64(Dump, OriginalFirstThunkfo);
                     else
+                        ThunkData = BitConverter.ToInt32(Dump, OriginalFirstThunkfo);
+
+                    int ThunkDatafo = RVA2Offset(Dump, (int)(ThunkData & 0xFFFFFFFF));
+                    if (ThunkDatafo == -1) { current += 20; continue; }
+
+                    ismscoree = true;
+                    for (int i = 0; i < CorExeMain.Length; i++)
                     {
-                        for (int i = 0; i < mscoreeAscii.Length; i++)
+                        if (ThunkDatafo + 2 + i >= Dump.Length || (Dump[ThunkDatafo + 2 + i] != CorExeMain[i] && Dump[ThunkDatafo + 2 + i] != CorDllMain[i]))
                         {
-                            if (NameOffset + i >= Dump.Length || Dump[NameOffset + i] != mscoreeAscii[i]) // Added bounds check
-                            {
-                                ismscoree = false;
-                                break;
-                            }
+                            ismscoree = false;
+                            break;
                         }
                     }
 
                     if (ismscoree)
                     {
-                        // OriginalFirstThunk is at offset 0 from the start of IMAGE_IMPORT_DESCRIPTOR
-                        if (impdiroffset + current + 4 > Dump.Length) // Check bounds for OriginalFirstThunk
-                        {
-                            current += 20;
-                            continue;
-                        }
-                        int OriginalFirstThunk = ReadInt32Safe(Dump, impdiroffset + current);
-                        int OriginalFirstThunkfo = RVA2Offset(Dump, OriginalFirstThunk);
-                        if (OriginalFirstThunkfo == -1) // Invalid OriginalFirstThunkfo
-                        {
-                            current += 20;
-                            continue;
-                        }
-
-                        if (OriginalFirstThunkfo + 4 > Dump.Length) // Check bounds for ThunkData
-                        {
-                            current += 20;
-                            continue;
-                        }
-                        ThunkData = ReadInt32Safe(Dump, OriginalFirstThunkfo);
-                        int ThunkDatafo = RVA2Offset(Dump, ThunkData);
-                        if (ThunkDatafo == -1) // Invalid ThunkDatafo
-                        {
-                            current += 20;
-                            continue;
-                        }
-
-                        ismscoree = true;
-                        // Check bounds for CorExeMain/CorDllMain comparison (starts 2 bytes after ThunkDatafo)
-                        if (ThunkDatafo + 2 + CorExeMain.Length > Dump.Length)
-                        {
-                            ismscoree = false;
-                        }
-                        else
-                        {
-                            for (int i = 0; i < CorExeMain.Length; i++)
-                            {
-                                if (ThunkDatafo + 2 + i >= Dump.Length || (Dump[ThunkDatafo + 2 + i] != CorExeMain[i] && Dump[ThunkDatafo + 2 + i] != CorDllMain[i])) // Added bounds check
-                                {
-                                    ismscoree = false;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (ismscoree)
-                        {
-                            // FirstThunk is at offset 16 from the start of IMAGE_IMPORT_DESCRIPTOR
-                            if (impdiroffset + current + 16 + 4 > Dump.Length) // Check bounds for ThunkToFix
-                            {
-                                current += 20;
-                                continue;
-                            }
-                            ThunkToFix = ReadInt32Safe(Dump, impdiroffset + current + 16);
-                            break;
-                        }
+                        ThunkToFix = ReadInt32Safe(Dump, impdiroffset + current + 16);
+                        break;
                     }
                 }
-                catch
-                {
-                    // Catch unexpected exceptions during parsing
-                }
-
-                current += 20; // 20 = size of IMAGE_IMPORT_DESCRIPTOR
+                current += 20;
             }
 
             if (ThunkToFix <= 0 || ThunkData == 0) return false;
@@ -1927,44 +1879,66 @@ namespace Mega_Dumper
             int ThunkToFixfo = RVA2Offset(Dump, ThunkToFix);
             if (ThunkToFixfo == -1) return false;
 
-            // Use MemoryStream to avoid modifying original array directly until necessary
             using var ms = new MemoryStream(Dump);
             BinaryWriter writer = new(ms);
 
-            if (ThunkToFixfo + 4 > Dump.Length) return false; // Check bounds for ThunkValue
-            int ThunkValue = ReadInt32Safe(Dump, ThunkToFixfo);  // old thunk value
-            if (ThunkValue <= 0 || RVA2Offset(Dump, ThunkValue) == -1)
+            long currentThunkValue = isPE64 ? BitConverter.ToInt64(Dump, ThunkToFixfo) : BitConverter.ToInt32(Dump, ThunkToFixfo);
+            if (currentThunkValue <= 0 || RVA2Offset(Dump, (int)(currentThunkValue & 0xFFFFFFFF)) == -1)
             {
                 ms.Position = ThunkToFixfo;
-                writer.Write(ThunkData);
+                if (isPE64)
+                    writer.Write((long)ThunkData);
+                else
+                    writer.Write((int)ThunkData);
             }
 
-            // EntryPoint is at PEOffset + 0x028
-            if (PEOffset + 0x028 + 4 > Dump.Length) return false; // Check bounds for EntryPoint
-            int EntryPoint = ReadInt32Safe(Dump, PEOffset + 0x028);
+            int EntryPointOffset = PEOffset + 0x028;
+            int EntryPoint = ReadInt32Safe(Dump, EntryPointOffset);
 
             if (EntryPoint <= 0 || RVA2Offset(Dump, EntryPoint) == -1)
             {
                 long realThunkAddress = dumpVA + ThunkToFix;
-                // BitConverter.GetBytes((uint)realThunkAddress) is safe here as ThunkToFix is int
-                byte[] ThunkToFixbytes = BitConverter.GetBytes((uint)realThunkAddress);
-                
-                // Loop with bounds check
-                for (int i = 0; i < Dump.Length - 6; i++) // -6 for 6-byte pattern
+                byte[] ThunkToFixbytes = BitConverter.GetBytes(isPE64 ? (ulong)realThunkAddress : (ulong)(uint)realThunkAddress);
+
+                if (isPE64)
                 {
-                    if (i + 5 >= Dump.Length || i + 3 >= ThunkToFixbytes.Length) continue; // Further bounds check
-
-                    if (Dump[i + 0] == 0x0FF && Dump[i + 1] == 0x025 &&
-                        Dump[i + 2] == ThunkToFixbytes[0] && Dump[i + 3] == ThunkToFixbytes[1] &&
-                        Dump[i + 4] == ThunkToFixbytes[2] && Dump[i + 5] == ThunkToFixbytes[3])
+                    // For x64, we search for FF 25 [Rel32] pointing to the thunk
+                    for (int i = 0; i < Dump.Length - 6; i++)
                     {
-                        int EntrPointRVA = Offset2RVA(Dump, i);
-                        if (EntrPointRVA == -1) continue; // Invalid RVA
-
-                        if (PEOffset + 0x028 + 4 > Dump.Length) break; // Final check before writing
-                        ms.Position = PEOffset + 0x028;
-                        writer.Write(EntrPointRVA);
-                        break;
+                        if (Dump[i] == 0xFF && Dump[i + 1] == 0x25)
+                        {
+                            int rel32 = BitConverter.ToInt32(Dump, i + 2);
+                            long targetVA = (long)dumpVA + i + 6 + rel32;
+                            if (targetVA == realThunkAddress)
+                            {
+                                int EntrPointRVA = Offset2RVA(Dump, i);
+                                if (EntrPointRVA != -1)
+                                {
+                                    ms.Position = EntryPointOffset;
+                                    writer.Write(EntrPointRVA);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    byte[] pattern = BitConverter.GetBytes((uint)realThunkAddress);
+                    for (int i = 0; i < Dump.Length - 6; i++)
+                    {
+                        if (Dump[i] == 0xFF && Dump[i + 1] == 0x25 &&
+                            Dump[i + 2] == pattern[0] && Dump[i + 3] == pattern[1] &&
+                            Dump[i + 4] == pattern[2] && Dump[i + 5] == pattern[3])
+                        {
+                            int EntrPointRVA = Offset2RVA(Dump, i);
+                            if (EntrPointRVA != -1)
+                            {
+                                ms.Position = EntryPointOffset;
+                                writer.Write(EntrPointRVA);
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -2423,9 +2397,15 @@ namespace Mega_Dumper
                                                         for (int i = 0; i < nrofsection; i++)
                                                         {
                                                             virtualsize = sections[i].virtual_size;
+                                                            virtualAddress = sections[i].virtual_address;
+                                                            
                                                             int toadd = virtualsize % sectionalignment;
                                                             if (toadd != 0) toadd = sectionalignment - toadd;
-                                                            calculatedimagesize = calculatedimagesize + virtualsize + toadd;
+                                                            
+                                                            // Correctly calculate total size by finding the end of the last section
+                                                            int sectionEnd = virtualAddress + virtualsize + toadd;
+                                                            if (sectionEnd > calculatedimagesize)
+                                                                calculatedimagesize = sectionEnd;
                                                         }
 
                                                         if (calculatedimagesize > sizeofimage) sizeofimage = calculatedimagesize;
@@ -2487,30 +2467,21 @@ namespace Mega_Dumper
                                                         int rightrawsize = 0;
                                                         for (int l = 0; l < nrofsection; l++)
                                                         {
-                                                            rawsize = sections[l].size_of_raw_data;
-                                                            rawAddress = sections[l].pointer_to_raw_data;
                                                             virtualsize = sections[l].virtual_size;
                                                             virtualAddress = sections[l].virtual_address;
 
-                                                            // RawSize = Virtual Size rounded on FileAlignment
-                                                            calcrawsize = 0;
-                                                            calcrawsize = virtualsize % filealignment;
-                                                            if (calcrawsize != 0) calcrawsize = filealignment - calcrawsize;
-                                                            calcrawsize = virtualsize + calcrawsize;
-
-                                                            if ((calcrawsize != 0 && rawsize != calcrawsize && rawsize != virtualsize)
-                                                               || rawAddress < 0)
+                                                            // Memory dumper always produces a "fixed" dump (Raw layout = Virtual layout)
+                                                            // to prevent corruption and fragmentation.
+                                                            rawsize = virtualsize;
+                                                            rawAddress = virtualAddress;
+                                                            
+                                                            using (BinaryWriter sectionWriter = new(new MemoryStream(virtualdump)))
                                                             {
-                                                                // if raw size is bad:
-                                                                rawsize = virtualsize;
-                                                                rawAddress = virtualAddress;
-                                                                BinaryWriter writer = new(new MemoryStream(virtualdump));
-                                                                // FIX: Use dynamic sectionTableOffset instead of hardcoded 0xF8
-                                                                writer.BaseStream.Position = PEOffset + sectionTableOffset + (0x28 * l) + 16;
-                                                                writer.Write(virtualsize);
-                                                                writer.BaseStream.Position = PEOffset + sectionTableOffset + (0x28 * l) + 20;
-                                                                writer.Write(virtualAddress);
-                                                                writer.Close();
+                                                                // Fix section header in memory buffer
+                                                                sectionWriter.BaseStream.Position = PEOffset + 24 + sizeofoptionalheader + (0x28 * l) + 16;
+                                                                sectionWriter.Write(virtualsize);   // SizeOfRawData
+                                                                sectionWriter.BaseStream.Position = PEOffset + 24 + sizeofoptionalheader + (0x28 * l) + 20;
+                                                                sectionWriter.Write(virtualAddress); // PointerToRawData
                                                             }
 
                                                             byte[] csection = new byte[0];
@@ -2556,16 +2527,14 @@ namespace Mega_Dumper
 
                                                             try
                                                             {
-                                                                Array.Copy(csection, 0, virtualdump, rawAddress, rightsize);
+                                                                // Force copy to virtualAddress to avoid corrupting header
+                                                                Array.Copy(csection, 0, virtualdump, virtualAddress, rightsize);
                                                             }
                                                             catch
                                                             {
                                                             }
-
-                                                            if (l == nrofsection - 1)
-                                                            {
-                                                                rightrawsize = rawAddress + rawsize;
-                                                            }
+                                                            
+                                                            rightrawsize = sizeofimage;
                                                         }
 
                                                         FixImportandEntryPoint((long)(j + (ulong)k), virtualdump);
@@ -2574,9 +2543,9 @@ namespace Mega_Dumper
                                                         if (isNetFile)
                                                             dumpdir = ddirs.dumps;
 
-                                                        filename = dumpdir + "\\vdump_" + (j + (ulong)k).ToString("X8");
+                                                        filename = dumpdir + "\\vdump_" + (j + (ulong)k).ToString("X");
                                                         if (File.Exists(filename))
-                                                            filename = dumpdir + "\\vdump" + CurrentCount.ToString() + "_" + (j + (ulong)k).ToString("X8");
+                                                            filename = dumpdir + "\\vdump" + CurrentCount.ToString() + "_" + (j + (ulong)k).ToString("X");
 
                                                         if (IsDll)
                                                             filename += ".dll";
@@ -2964,8 +2933,7 @@ namespace Mega_Dumper
                                         // - ModuleNotFound: Module isn't in process list
                                         // - IatSearchError: Standard search failed
                                         bool skipFallbacks = (scyResult == MegaDumper.ScyllaError.PidNotFound) ||
-                                                            (scyResult == MegaDumper.ScyllaError.ModuleNotFound) ||
-                                                            (scyResult == MegaDumper.ScyllaError.IatSearchError);
+                                                            (scyResult == MegaDumper.ScyllaError.ModuleNotFound);
                                         
                                         if (skipFallbacks && scyResult != MegaDumper.ScyllaError.Success)
                                         {

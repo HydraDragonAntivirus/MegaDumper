@@ -304,30 +304,33 @@ bool IATSearch::findIATStartAndSize(DWORD_PTR address, DWORD_PTR * addressIAT, D
 {
 	BYTE *dataBuffer = 0;
     DWORD_PTR baseAddress = 0;
-    DWORD baseSize = 0;
+    SIZE_T baseSize = 0;
 
     getMemoryBaseAndSizeForIat(address, &baseAddress, &baseSize);
 
-    if (!baseAddress)
+    if (!baseAddress || baseSize == 0)
         return false;
 
-	dataBuffer = new BYTE[baseSize * (sizeof(DWORD_PTR)*3)];
+	// FIX: Removed dangerous multiplier and added try-catch
+	try {
+		dataBuffer = new (std::nothrow) BYTE[baseSize];
+	} catch (...) {
+		return false;
+	}
 
     if (!dataBuffer)
         return false;
 
-	ZeroMemory(dataBuffer, baseSize * (sizeof(DWORD_PTR)*3));
+	ZeroMemory(dataBuffer, baseSize);
 
 	if (!readMemoryFromProcess(baseAddress, baseSize, dataBuffer))
 	{
 #ifdef DEBUG_COMMENTS
-		Scylla::debugLog.log(L"findIATStartAddress :: error reading memory");
+		Scylla::debugLog.log(L"findIATStartAndSize :: error reading memory");
 #endif
 		delete [] dataBuffer;
 		return false;
 	}
-
-	//printf("address %X memBasic.BaseAddress %X memBasic.RegionSize %X\n",address,memBasic.BaseAddress,memBasic.RegionSize);
 
 	*addressIAT = findIATStartAddress(baseAddress, address, dataBuffer);
 
@@ -342,9 +345,12 @@ DWORD_PTR IATSearch::findIATStartAddress(DWORD_PTR baseAddress, DWORD_PTR startA
 {
 	DWORD_PTR *pIATAddress = 0;
 
-	pIATAddress = (DWORD_PTR *)((startAddress - baseAddress) + (DWORD_PTR)dataBuffer);
+	// FIX: Align the start pointer to the size of a pointer to prevent infinite loops and crashes
+	DWORD_PTR offset = startAddress - baseAddress;
+	offset &= ~(sizeof(DWORD_PTR) - 1);
+	pIATAddress = (DWORD_PTR *)(offset + (DWORD_PTR)dataBuffer);
 
-	while((DWORD_PTR)pIATAddress != (DWORD_PTR)dataBuffer)
+	while((DWORD_PTR)pIATAddress > (DWORD_PTR)dataBuffer)
 	{
 		if (isInvalidMemoryForIat(*pIATAddress))
 		{
@@ -369,17 +375,20 @@ DWORD_PTR IATSearch::findIATStartAddress(DWORD_PTR baseAddress, DWORD_PTR startA
 	return baseAddress;
 }
 
-DWORD IATSearch::findIATSize(DWORD_PTR baseAddress, DWORD_PTR iatAddress, BYTE * dataBuffer, DWORD bufferSize)
+DWORD IATSearch::findIATSize(DWORD_PTR baseAddress, DWORD_PTR iatAddress, BYTE * dataBuffer, SIZE_T bufferSize)
 {
 	DWORD_PTR *pIATAddress = 0;
 
-	pIATAddress = (DWORD_PTR *)((iatAddress - baseAddress) + (DWORD_PTR)dataBuffer);
+	// FIX: Align the pointer
+	DWORD_PTR offset = iatAddress - baseAddress;
+	offset &= ~(sizeof(DWORD_PTR) - 1);
+	pIATAddress = (DWORD_PTR *)(offset + (DWORD_PTR)dataBuffer);
 
 #ifdef DEBUG_COMMENTS
-	Scylla::debugLog.log(L"findIATSize :: baseAddress %X iatAddress %X dataBuffer %X pIATAddress %X", baseAddress, iatAddress, dataBuffer, pIATAddress);
+	Scylla::debugLog.log(L"findIATSize :: baseAddress %p iatAddress %p dataBuffer %p pIATAddress %p", (void*)baseAddress, (void*)iatAddress, (void*)dataBuffer, (void*)pIATAddress);
 #endif
 
-	while((DWORD_PTR)pIATAddress < ((DWORD_PTR)dataBuffer + bufferSize - 1))
+	while((DWORD_PTR)pIATAddress < ((DWORD_PTR)dataBuffer + bufferSize - sizeof(DWORD_PTR)))
 	{
 #ifdef DEBUG_COMMENTS
 		Scylla::debugLog.log(L"findIATSize :: %X %X %X", pIATAddress, *pIATAddress, *(pIATAddress + 1));
@@ -597,7 +606,7 @@ bool isSectionSizeTooBig(SIZE_T sectionSize) {
 	return (sectionSize > 100000000);
 }
 
-void IATSearch::getMemoryBaseAndSizeForIat( DWORD_PTR address, DWORD_PTR* baseAddress, DWORD* baseSize )
+void IATSearch::getMemoryBaseAndSizeForIat( DWORD_PTR address, DWORD_PTR* baseAddress, SIZE_T* baseSize )
 {
     MEMORY_BASIC_INFORMATION memBasic1 = {0};
     MEMORY_BASIC_INFORMATION memBasic2 = {0};
@@ -613,9 +622,7 @@ void IATSearch::getMemoryBaseAndSizeForIat( DWORD_PTR address, DWORD_PTR* baseAd
     }
 
     *baseAddress = (DWORD_PTR)memBasic2.BaseAddress;
-    *baseSize = (DWORD)memBasic2.RegionSize;
-
-	adjustSizeForBigSections(baseSize);
+    *baseSize = memBasic2.RegionSize;
 
     //Get the neighbours
     if (VirtualQueryEx(hProcess,(LPCVOID)((DWORD_PTR)memBasic2.BaseAddress - 1), &memBasic1, sizeof(MEMORY_BASIC_INFORMATION)))
@@ -641,7 +648,7 @@ void IATSearch::getMemoryBaseAndSizeForIat( DWORD_PTR address, DWORD_PTR* baseAd
 				end = (DWORD_PTR)memBasic3.BaseAddress + (DWORD_PTR)memBasic3.RegionSize;
 
 				*baseAddress = start;
-				*baseSize = (DWORD)(end - start);
+				*baseSize = (SIZE_T)(end - start);
 			}
 		}
     }

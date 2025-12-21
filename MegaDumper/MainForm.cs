@@ -1914,22 +1914,24 @@ namespace Mega_Dumper
                 if (isPE64)
                 {
                     // For x64, we search for FF 25 [Rel32] pointing to the thunk
+                    // The rel32 is RIP-relative, so we need to calculate using RVA, not file offset
                     for (int i = 0; i < Dump.Length - 6; i++)
                     {
                         if (Dump[i] == 0xFF && Dump[i + 1] == 0x25)
                         {
+                            int currentRVA = Offset2RVA(Dump, i);
+                            if (currentRVA == -1) continue;
+                            
                             int rel32 = BitConverter.ToInt32(Dump, i + 2);
-                            long targetVA = (long)dumpVA + i + 6 + rel32;
+                            // RIP-relative: target = RIP + rel32, where RIP = instruction address + 6
+                            long targetVA = (long)dumpVA + currentRVA + 6 + rel32;
+                            
                             if (targetVA == realThunkAddress)
                             {
-                                int EntrPointRVA = Offset2RVA(Dump, i);
-                                if (EntrPointRVA != -1)
-                                {
-                                    try { File.AppendAllText(logPath, $"[FixImport] Detected Entry Point at RVA 0x{EntrPointRVA:X} (File Offset 0x{i:X}). Patching...\n"); } catch {}
-                                    ms.Position = EntryPointOffset;
-                                    writer.Write(EntrPointRVA);
-                                    break;
-                                }
+                                try { File.AppendAllText(logPath, $"[FixImport] Detected Entry Point at RVA 0x{currentRVA:X} (File Offset 0x{i:X}). Patching...\n"); } catch {}
+                                ms.Position = EntryPointOffset;
+                                writer.Write(currentRVA);
+                                break;
                             }
                         }
                     }
@@ -2862,15 +2864,14 @@ namespace Mega_Dumper
                                         // Fallback if Thread Context failed (or returned 0)
                                         ulong finalEntryPoint = (realOEP > 0) ? realOEP : entryPoint;
                                         
-                                        // Final Safety Check on the Chosen EntryPoint
-                                        // If falling back to Header EP, we must ensure it's not the trap.
-                                        if (realOEP == 0) 
+                                        // CRITICAL FIX: If using Header EP, it's an RVA - convert to VA for Scylla
+                                        // Thread context gives us VA (actual register value), but PE header gives RVA
+                                        if (realOEP == 0 && entryPoint > 0 && entryPoint < imageBase)
                                         {
-                                            // Check header EP again? Or just trust Scylla auto-detect (0)?
-                                            // If Scylla auto-detect failed user, we might want to try Header EP but ONLY if valid memory.
-                                            // For now, let's try passing the Header EP if Thread failed, but user said '0' fails result.
-                                            // So if Header EP is used, we risk crash if untrapped.
-                                            // Let's assume Thread finding works for unpacked apps.
+                                            // entryPoint is an RVA from PE header, convert to VA
+                                            finalEntryPoint = imageBase + entryPoint;
+                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+                                                $"[{DateTime.Now}] Converted Header EP RVA 0x{entryPoint:X} to VA 0x{finalEntryPoint:X}\n");
                                         }
 
                                         // Single Scylla attempt - no retries

@@ -2407,7 +2407,6 @@ namespace Mega_Dumper
                                                         int calculatedimagesize = sizeOfHeaders;
 
                                                         int rawsize, rawAddress, virtualsize, virtualAddress = 0;
-                                                        int calcrawsize = 0;
 
                                                         for (int i = 0; i < nrofsection; i++)
                                                         {
@@ -2453,6 +2452,24 @@ namespace Mega_Dumper
                                                                         Array.Copy(vAddrB, 0, rawdump, hdrOff + 20, 4);
                                                                     }
 
+                                                                    // CRITICAL FIX: Patch ImageBase in rawdump header to match Runtime Base Address.
+                                                                    // This prevents crashes (Access Violation) when running the dump if relocations are missing/invalid,
+                                                                    // by ensuring the Loader loads the dump at the address it was dumped from (where code is already related).
+                                                                    ulong runtimeBase = j + (ulong)k;
+                                                                    ushort magicVal = BitConverter.ToUInt16(PeHeader, PEOffset + 24);
+                                                                    bool isPE64Val = (magicVal == 0x20B);
+                                                                    
+                                                                    if (isPE64Val)
+                                                                    {
+                                                                        // 64-bit ImageBase at PEOffset + 0x30
+                                                                        Array.Copy(BitConverter.GetBytes(runtimeBase), 0, rawdump, PEOffset + 0x30, 8);
+                                                                    }
+                                                                    else
+                                                                    {
+                                                                        // 32-bit ImageBase at PEOffset + 0x34
+                                                                        Array.Copy(BitConverter.GetBytes((uint)runtimeBase), 0, rawdump, PEOffset + 0x34, 4);
+                                                                    }
+
                                                                     dumpdir = ddirs.nativedirname;
                                                                     if (isNetFile)
                                                                         dumpdir = ddirs.dumps;
@@ -2461,10 +2478,24 @@ namespace Mega_Dumper
                                                                     if (File.Exists(filename))
                                                                         filename = dumpdir + "\\rawdump" + CurrentCount.ToString() + "_" + (j + (ulong)k).ToString("X");
 
-                                                                    if (IsDll)
-                                                                        filename += ".dll";
-                                                                    else
-                                                                        filename += ".exe";
+
+                                                                    
+                                                                    bool IsExe = false;
+                                                                    try {
+                                                                        short characteristics = BitConverter.ToInt16(PeHeader, PEOffset + 0x16);
+                                                                        if ((characteristics & 0x0002) != 0) IsExe = true;
+                                                                    } catch {}
+
+                                                                    if (IsDll) filename += ".dll";
+                                                                    else if (IsExe) filename += ".exe";
+                                                                    else filename += ".exe";
+
+                                                                    try {
+                                                                         File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                                            $"[{DateTime.Now}] Dump: {Path.GetFileName(filename)} | Base: {runtimeBase:X} | IsDll: {IsDll} | IsExe: {IsExe}\n");
+                                                                    } catch {}
+
+
 
                                                                     try
                                                                     {
@@ -2862,7 +2893,42 @@ namespace Mega_Dumper
                                         }
 
                                         // Fallback if Thread Context failed (or returned 0)
+                                        // Fallback if Thread Context failed (or returned 0)
                                         ulong finalEntryPoint = (realOEP > 0) ? realOEP : entryPoint;
+
+                                        // FIX: If Thread Context failed, try to detect .NET Entry Point using FixImportandEntryPoint logic
+                                        if (realOEP == 0)
+                                        {
+                                            try
+                                            {
+                                                byte[] dumpBuffer = File.ReadAllBytes(dumpedFile);
+                                                // Save original EP from buffer
+                                                int peOff = BitConverter.ToInt32(dumpBuffer, 0x3C);
+                                                int epOff = peOff + 0x28; // AddressOfEntryPoint
+                                                int oldEpRva = BitConverter.ToInt32(dumpBuffer, epOff);
+                                                
+                                                if (FixImportandEntryPoint((long)imageBase, dumpBuffer))
+                                                {
+                                                    int newEpRva = BitConverter.ToInt32(dumpBuffer, epOff);
+                                                    if (newEpRva != oldEpRva)
+                                                    {
+                                                        finalEntryPoint = imageBase + (ulong)newEpRva;
+                                                        File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+                                                            $"[{DateTime.Now}] FixImportandEntryPoint detected new OEP RVA 0x{newEpRva:X} (VA 0x{finalEntryPoint:X}). Using it.\n");
+                                                        
+                                                        // Update the file on disk so Scylla sees the correct header if it reads it
+                                                        File.WriteAllBytes(dumpedFile, dumpBuffer);
+                                                    }
+                                                }
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                try {
+                                                    File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+                                                        $"[{DateTime.Now}] FixImportandEntryPoint fallback failed: {ex.Message}\n");
+                                                } catch {}
+                                            }
+                                        }
                                         
                                         // CRITICAL FIX: If using Header EP, it's an RVA - convert to VA for Scylla
                                         // Thread context gives us VA (actual register value), but PE header gives RVA

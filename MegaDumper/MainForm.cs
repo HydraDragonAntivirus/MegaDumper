@@ -2995,9 +2995,28 @@ namespace Mega_Dumper
                                                 $"[{DateTime.Now}] Failed to get Thread Context: {ctxEx.Message}. Fallback to Header EP.\n");
                                         }
 
-                                        // Fallback if Thread Context failed (or returned 0)
-                                        // Fallback if Thread Context failed (or returned 0)
-                                        ulong finalEntryPoint = (realOEP > 0) ? realOEP : entryPoint;
+                                        // CRITICAL FIX: For native executables, prefer PE header entry point over thread context.
+                                        // Thread context (RIP) gives CURRENT execution position, not the original entry point.
+                                        // For a simple looping program, RIP will be inside the loop, not at the entry point!
+                                        // Only use thread context for packed executables where the PE header EP is corrupted.
+                                        
+                                        // Use PE header entry point as primary
+                                        ulong finalEntryPoint = entryPoint;
+                                        
+                                        // Only use thread context RIP if it's close to the expected code start (within first 16KB of code)
+                                        // This helps detect OEP for unpacked executables while avoiding loop detection issues
+                                        if (realOEP > 0 && realOEP >= imageBase && realOEP < imageBase + 0x4000)
+                                        {
+                                            finalEntryPoint = realOEP;
+                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+                                                $"[{DateTime.Now}] Using Thread Context RIP 0x{realOEP:X} as OEP (near code start).\n");
+                                        }
+                                        else if (realOEP > 0)
+                                        {
+                                            // Thread context is far from entry - probably inside a loop, use PE header EP
+                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+                                                $"[{DateTime.Now}] Thread RIP 0x{realOEP:X} is far from code start, using PE header EP 0x{entryPoint:X} instead.\n");
+                                        }
 
                                         // FIX: If Thread Context failed, try to detect .NET Entry Point using FixImportandEntryPoint logic
                                         if (realOEP == 0)
@@ -3077,6 +3096,24 @@ namespace Mega_Dumper
                                                     scyFixFilename,
                                                     advancedSearch: true,
                                                     createNewIat: true);
+                                                
+                                                // FALLBACK: Basic Search
+                                                // If Advanced Search failed (IatSearchError), try Basic Search (advancedSearch = false)
+                                                // This is often more reliable for simple packed/unpacked files where heuristics fail.
+                                                if (scyResult == MegaDumper.ScyllaError.IatSearchError)
+                                                {
+                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+                                                        $"[{DateTime.Now}] Advanced Search failed (IatSearchError). Retrying with Basic Search...\n");
+                                                        
+                                                     scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
+                                                        processId,
+                                                        imageBase,
+                                                        finalEntryPoint,
+                                                        dumpedFile,
+                                                        scyFixFilename,
+                                                        advancedSearch: false,
+                                                        createNewIat: true);
+                                                }
                                                 
                                                 // If Thread-based OEP failed or crashed, try Header-based EP as fallback
                                                 if (scyResult != MegaDumper.ScyllaError.Success && finalEntryPoint != entryPoint)

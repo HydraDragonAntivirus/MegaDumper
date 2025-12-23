@@ -1776,6 +1776,60 @@ namespace Mega_Dumper
             }
         }
 
+        /// <summary>
+        /// Heuristic: Tries to find the OriginalFilename by looking at the PE Export Directory.
+        /// Helpful for native DLLs/EXEs that aren't in the module map.
+        /// </summary>
+        private string TryGetOriginalFilenameFromDump(byte[] dump, int peOffset)
+        {
+            try
+            {
+                if (dump == null || peOffset < 0 || peOffset + 0x88 > dump.Length) return null;
+
+                // 1. Get Export Directory RVA from Data Directory [0]
+                // Optional Header Standard Fields (Magic) determines offset.
+                ushort magic = BitConverter.ToUInt16(dump, peOffset + 24);
+                bool isPE64 = (magic == 0x20B);
+                int exportDirOffset = peOffset + 24 + (isPE64 ? 112 : 96); // Offset to DataDirectories
+
+                int exportRva = BitConverter.ToInt32(dump, exportDirOffset);
+                int exportSize = BitConverter.ToInt32(dump, exportDirOffset + 4);
+
+                if (exportRva == 0 || exportSize == 0) return null;
+
+                // 2. Convert RVA to Offset
+                int exportOffset = RVA2Offset(dump, exportRva);
+                if (exportOffset < 0 || exportOffset + 40 > dump.Length) return null;
+
+                // 3. Read Name RVA from Export Directory Table (offset 12)
+                int nameRva = BitConverter.ToInt32(dump, exportOffset + 12);
+                if (nameRva == 0) return null;
+
+                // 4. Read Name String
+                int nameStrOffset = RVA2Offset(dump, nameRva);
+                if (nameStrOffset < 0 || nameStrOffset >= dump.Length) return null;
+
+                // Read ASCII string
+                var sb = new System.Text.StringBuilder();
+                for (int i = 0; i < 260 && (nameStrOffset + i < dump.Length); i++)
+                {
+                    byte b = dump[nameStrOffset + i];
+                    if (b == 0) break;
+                    sb.Append((char)b);
+                }
+
+                string result = sb.ToString();
+                // Filter garbage
+                if (string.IsNullOrWhiteSpace(result) || result.Any(c => c < 32 || c > 126)) return null;
+
+                return result;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private unsafe string DumpProcessLogic(uint processId, DUMP_DIRECTORIES ddirs, bool dumpNative, bool restoreFilename, Dictionary<ulong, string> moduleMap = null)
         {
             IntPtr hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, 0, processId);
@@ -2171,6 +2225,16 @@ namespace Mega_Dumper
                                                             friendlyName = moduleMap[moduleBaseAddr];
                                                         }
 
+                                                        // Heuristic fallback: Try to read Export Directory Name for native DLLs
+                                                        if (string.IsNullOrEmpty(friendlyName))
+                                                        {
+                                                            string exportName = TryGetOriginalFilenameFromDump(virtualdump, PEOffset);
+                                                            if (!string.IsNullOrEmpty(exportName))
+                                                            {
+                                                                friendlyName = exportName;
+                                                            }
+                                                        }
+
                                                         if (!string.IsNullOrEmpty(friendlyName))
                                                         {
                                                             // Use the actual module name if available (avoids UnknownName)
@@ -2181,8 +2245,8 @@ namespace Mega_Dumper
                                                         }
                                                         else
                                                         {
-                                                            // Fallback to vdump
-                                                            filename = dumpdir + "\\vdump_" + moduleBaseAddr.ToString("X");
+                                                            // Fallback to rawdump (User requested rawdump, not vdump)
+                                                            filename = dumpdir + "\\rawdump_" + moduleBaseAddr.ToString("X");
 
                                                             // =================== FIX START ===================
                                                             // Fixed overwriting issue: Use a loop to find a truly unique name
@@ -2191,7 +2255,7 @@ namespace Mega_Dumper
                                                             string baseVdumpName = filename;
                                                             while (File.Exists(filename))
                                                             {
-                                                                filename = dumpdir + "\\vdump" + dupCount.ToString() + "_" + moduleBaseAddr.ToString("X");
+                                                                filename = dumpdir + "\\rawdump" + dupCount.ToString() + "_" + moduleBaseAddr.ToString("X");
                                                                 dupCount++;
                                                             }
                                                             // =================== FIX END =====================
@@ -2334,9 +2398,10 @@ namespace Mega_Dumper
                                         // =================== FIX START: SORTING LOGIC ===================
                                         // If we don't have version info (common for native/packed apps),
                                         // check if we gave it a friendly name from the Module List.
-                                        // If the file starts with "vdump_", it means we failed to identify it.
+                                        // If the file starts with "rawdump_", it means we failed to identify it.
                                         // If it has a real name (e.g. "kernel32_7FF..."), keep it in dumps/root.
-                                        if (fi.Name.StartsWith("vdump_", StringComparison.OrdinalIgnoreCase))
+                                        if (fi.Name.StartsWith("rawdump_", StringComparison.OrdinalIgnoreCase) ||
+                                            fi.Name.StartsWith("vdump_", StringComparison.OrdinalIgnoreCase))
                                         {
                                             finalDir = ddirs.unknowndirname;
                                         }
@@ -2433,21 +2498,33 @@ namespace Mega_Dumper
 
                             foreach (var dir in dirsToScan)
                             {
-                                foreach (string dumpedFile in Directory.GetFiles(dir, "rawdump_*.*"))
+                                // FIX: Search for rawdump_*.* (matches new naming) AND standard dumps
+                                var allFiles = Directory.GetFiles(dir, "*_*.*");
+
+                                foreach (string dumpedFile in allFiles)
                                 {
                                     try
                                     {
-                                        // NEW LOGIC: Scylla Strict Check .NET ONLY
-                                        if (!IsDotNetAssembly(dumpedFile)) continue;
+                                        // =================== FIX START ===================
+                                        // REMOVED THE .NET RESTRICTION FOR SCYLLA AS REQUESTED
+                                        // Scylla Strict Check .NET ONLY -> DISABLED
+                                        // if (!IsDotNetAssembly(dumpedFile)) continue;
+                                        // =================== FIX END =====================
 
                                         string checkScyfix = Path.ChangeExtension(dumpedFile, null) + "_scyfix" + Path.GetExtension(dumpedFile);
                                         if (File.Exists(checkScyfix)) continue;
 
                                         string fileNameNoExt = Path.GetFileNameWithoutExtension(dumpedFile);
-                                        string hexAddress = fileNameNoExt.Split('_').Last();
-                                        ulong imageBase = Convert.ToUInt64(hexAddress, 16);
 
-                                        if (imageBase > 0)
+                                        // Extract last part as address
+                                        string hexAddress = fileNameNoExt.Split('_').Last();
+
+                                        // Ensure it's actually an address
+                                        if (!ulong.TryParse(hexAddress, System.Globalization.NumberStyles.HexNumber, null, out ulong imageBase))
+                                            continue;
+
+                                        // Only fix if it looks like a valid image base
+                                        if (imageBase > 0x1000)
                                         {
                                             MegaDumper.ScyllaError scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
                                                   processId,
@@ -2457,6 +2534,12 @@ namespace Mega_Dumper
                                                   checkScyfix,
                                                   advancedSearch: false,
                                                   createNewIat: true);
+
+                                            // Optional: Sanitize only if successful
+                                            if (scyResult == MegaDumper.ScyllaError.Success)
+                                            {
+                                                SanitizeScyfixFile(checkScyfix);
+                                            }
                                         }
                                     }
                                     catch { }

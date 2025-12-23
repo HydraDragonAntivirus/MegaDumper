@@ -2969,25 +2969,8 @@ namespace Mega_Dumper
                                             
                                             string scyNativeDump = Path.Combine(Path.GetDirectoryName(dumpedFile), "scy_native_" + Path.GetFileName(dumpedFile));
                                             
-                                            // Read correct entry point from the existing dump file's PE header
-                                            // This ensures we pass a correct VA to Scylla
-                                            ulong nativeDumpEntryPoint = imageBase; // Default to imageBase if we can't read
-                                            try
-                                            {
-                                                byte[] dumpPeData = File.ReadAllBytes(dumpedFile);
-                                                int nd_peOffset = BitConverter.ToInt32(dumpPeData, 0x3C);
-                                                int nd_optHeaderOffset = nd_peOffset + 4 + 20;
-                                                bool nd_is64 = BitConverter.ToUInt16(dumpPeData, nd_optHeaderOffset) == 0x20B;
-                                                int nd_epOffset = nd_is64 ? (nd_optHeaderOffset + 16) : (nd_optHeaderOffset + 16);
-                                                uint nd_entryPointRva = BitConverter.ToUInt32(dumpPeData, nd_epOffset);
-                                                nativeDumpEntryPoint = imageBase + nd_entryPointRva;
-                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                    $"  Read EP RVA 0x{nd_entryPointRva:X} from dump, VA = 0x{nativeDumpEntryPoint:X}\n");
-                                            }
-                                            catch { }
-                                            
-                                            // Try native dump with correct entry point
-                                            bool dumpSuccess = MegaDumper.ScyllaBindings.DumpProcessX64(processId, imageBase, nativeDumpEntryPoint, scyNativeDump, dumpedFile);
+                                            // Try native dump (using dumpedFile as template/hint for Scylla)
+                                            bool dumpSuccess = MegaDumper.ScyllaBindings.DumpProcessX64(processId, imageBase, finalEntryPoint, scyNativeDump, dumpedFile);
                                             
                                             if (dumpSuccess && File.Exists(scyNativeDump))
                                             {

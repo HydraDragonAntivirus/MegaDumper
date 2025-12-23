@@ -581,14 +581,14 @@ namespace Mega_Dumper
                             Process theProc = null;
                             string directoryName = "";
                             string processname = procEntry.szExeFile;
-                            string isnet = "false";
+                            string isnet = "Unchecked";
 
                             try
                             {
                                 theProc = Process.GetProcessById((int)procEntry.th32ProcessID);
                                 if (theProc != null)  // Add null check here
                                 {
-                                    isnet = IsPEProcess((int)procEntry.th32ProcessID) ? "true" : "false";
+                                    isnet = GetProcessType((int)procEntry.th32ProcessID);
                                 }
                             }
                             catch
@@ -1074,6 +1074,63 @@ namespace Mega_Dumper
             }
         }
 
+        public string GetProcessType(int processid)
+        {
+            try
+            {
+                // Verify access rights first
+                using (var p = Process.GetProcessById(processid))
+                {
+                    if (p == null) return "Unchecked";
+                }
+            }
+            catch
+            {
+                return "Unchecked";
+            }
+
+            try
+            {
+                bool isNet = false;
+                bool isPe = false;
+
+                // check modules
+                try
+                {
+                    ProcModule.ModuleInfo[] modules = ProcModule.GetModuleInfos(processid);
+                    if (modules != null)
+                    {
+                        foreach (var m in modules)
+                        {
+                            if (string.IsNullOrEmpty(m.baseName)) continue;
+                            string lower = m.baseName.ToLower();
+
+                            if (lower.Contains("mscorlib.dll") || lower.Contains("clr.dll") || lower.Contains("coreclr.dll"))
+                            {
+                                isNet = true;
+                                break; 
+                            }
+                            
+                            if (lower.EndsWith(".exe") || lower.EndsWith(".dll") || lower.EndsWith(".sys"))
+                                isPe = true;
+                        }
+                    }
+                }
+                catch { }
+
+                if (isNet) return ".NET";
+                
+                // If not .NET, check if it's Native PE
+                if (isPe || IsPEProcess(processid)) return "Native";
+
+                return "Unchecked";
+            }
+            catch
+            {
+                 return "Unchecked";
+            }
+        }
+
         private bool SimplePECheck(int processId)
         {
             try
@@ -1183,7 +1240,7 @@ namespace Mega_Dumper
 
             string directoryName = "";
             string processname = "";
-            string isnet = "false";
+            string isnet = "Unchecked";
 
             /*
             IMO the key difference is in priviledges requirements.
@@ -1209,7 +1266,7 @@ namespace Mega_Dumper
                         {
                             theProc = Process.GetProcessById((int)procEntry.th32ProcessID);
 
-                            isnet = IsPEProcess((int)procEntry.th32ProcessID) ? "true" : "false";
+                            isnet = GetProcessType((int)procEntry.th32ProcessID);
                         }
                         catch
                         {
@@ -2427,9 +2484,7 @@ namespace Mega_Dumper
                                                                 isok = ReadProcessMemoryW(hProcess, j + (ulong)k, rawdump, (UIntPtr)rawdump.Length, out BytesRead);
                                                                 if (isok)
                                                                 {
-                                                                    dumpdir = ddirs.nativedirname;
-                                                                    if (isNetFile)
-                                                                        dumpdir = ddirs.dumps;
+                                                                    dumpdir = ddirs.dumps;
 
                                                                     filename = dumpdir + "\\rawdump_" + (j + (ulong)k).ToString("X");
                                                                     if (File.Exists(filename))
@@ -2538,9 +2593,7 @@ namespace Mega_Dumper
 
                                                         FixImportandEntryPoint((long)(j + (ulong)k), virtualdump);
 
-                                                        dumpdir = ddirs.nativedirname;
-                                                        if (isNetFile)
-                                                            dumpdir = ddirs.dumps;
+                                                        dumpdir = ddirs.dumps;
 
                                                         filename = dumpdir + "\\vdump_" + (j + (ulong)k).ToString("X");
                                                         if (File.Exists(filename))

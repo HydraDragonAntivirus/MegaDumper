@@ -1173,10 +1173,9 @@ namespace Mega_Dumper
             bool restoreFilename = !dontRestoreFilenameToolStripMenuItem.Checked;
 
             if (string.IsNullOrWhiteSpace(dirname) || !Directory.Exists(Path.GetPathRoot(dirname)))
-                dirname = AppDomain.CurrentDomain.BaseDirectory;
+                dirname = "C:\\";
 
-            string dumpsRoot = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Dumps");
-            DUMP_DIRECTORIES ddirs = new() { root = dumpsRoot };
+            DUMP_DIRECTORIES ddirs = new() { root = dirname };
             if (!CreateDirectories(ref ddirs))
             {
                 MessageBox.Show("Could not create or select a valid dump directory. Aborting.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -1701,13 +1700,7 @@ namespace Mega_Dumper
 
         public void SetDirectoriesPath(ref DUMP_DIRECTORIES dpmdirs)
         {
-            // Use dpmdirs.root if it's already set to a specific session folder,
-            // otherwise fallback to the default "Dumps" folder in the application directory.
-            if (string.IsNullOrEmpty(dpmdirs.root))
-                dpmdirs.dumps = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Dumps");
-            else
-                dpmdirs.dumps = dpmdirs.root;
-
+            dpmdirs.dumps = Path.Combine("C:\\", "Dumps");
             dpmdirs.nativedirname = Path.Combine(dpmdirs.dumps, ".NET Native");
             dpmdirs.sysdirname = Path.Combine(dpmdirs.dumps, "System");
             dpmdirs.unknowndirname = Path.Combine(dpmdirs.dumps, "UnknownName");
@@ -2382,20 +2375,13 @@ namespace Mega_Dumper
 
                                         string newFilename = Path.Combine(finalDir, safeName);
 
-                                        if (string.Equals(Path.GetFullPath(fi.FullName), Path.GetFullPath(newFilename), StringComparison.OrdinalIgnoreCase))
+                                        int count = 2;
+                                        while (File.Exists(newFilename))
                                         {
-                                            // File is already in the correct location with the correct name, do nothing
+                                            string extension = Path.GetExtension(newFilename) ?? ".dll";
+                                            newFilename = Path.Combine(finalDir, $"{Path.GetFileNameWithoutExtension(safeName)}({count++}){extension}");
                                         }
-                                        else
-                                        {
-                                            int count = 2;
-                                            while (File.Exists(newFilename))
-                                            {
-                                                string extension = Path.GetExtension(newFilename) ?? ".dll";
-                                                newFilename = Path.Combine(finalDir, $"{Path.GetFileNameWithoutExtension(safeName)}({count++}){extension}");
-                                            }
-                                            File.Move(fi.FullName, newFilename);
-                                        }
+                                        File.Move(fi.FullName, newFilename);
                                     }
                                     else
                                     {

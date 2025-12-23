@@ -1102,19 +1102,7 @@ bool PeParser::dumpProcess(DWORD_PTR modBase, DWORD_PTR entryPoint, const WCHAR 
 	{
 		setDefaultFileAlignment();
 
-		// Only override entry point if a valid one was provided
-		// entryPoint should be a VA (Virtual Address in runtime)
-		// We convert VA to RVA: RVA = VA - ModuleBase
-		if (entryPoint > modBase && entryPoint < (modBase + 0x10000000))
-		{
-			setEntryPointVa(entryPoint);
-		}
-		// If entryPoint looks like an RVA already (small value), use it directly
-		else if (entryPoint > 0 && entryPoint < 0x10000000)
-		{
-			setEntryPointRva((DWORD)entryPoint);
-		}
-		// Otherwise, keep the original entry point from the PE header
+		setEntryPointVa(entryPoint);
 
 		alignAllSectionHeaders();
 		fixPeHeader();

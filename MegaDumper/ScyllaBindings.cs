@@ -166,15 +166,7 @@ namespace MegaDumper
         {
             try
             {
-                // Validate entryPoint: Scylla expects a VA, not an RVA
-                // If entryPoint is less than imageBase and looks like an RVA (small value), convert it
-                ulong validEntryPoint = entryPoint;
-                if (entryPoint > 0 && entryPoint < imageBase && entryPoint < 0x10000000)
-                {
-                    validEntryPoint = imageBase + entryPoint;
-                }
-                
-                return ScyllaDumpProcessW_x64((UIntPtr)processId, inputFilePath, (UIntPtr)imageBase, (UIntPtr)validEntryPoint, outputPath) != 0;
+                return ScyllaDumpProcessW_x64((UIntPtr)processId, inputFilePath, (UIntPtr)imageBase, (UIntPtr)entryPoint, outputPath) != 0;
             }
             catch { return false; }
         }

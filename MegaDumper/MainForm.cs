@@ -13,10 +13,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Net;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using WinEnumerator;
@@ -2241,7 +2238,8 @@ namespace Mega_Dumper
 
                 if (restoreFilename)
                 {
-                    Action<string, string> renameFiles = (string sourceDir, string targetDir) => {
+                    Action<string, string> renameFiles = (string sourceDir, string targetDir) =>
+                    {
                         if (Directory.Exists(sourceDir))
                         {
                             DirectoryInfo di = new DirectoryInfo(sourceDir);
@@ -2391,7 +2389,8 @@ namespace Mega_Dumper
                                             continue;
                                         }
 
-                                        this.Invoke((MethodInvoker)delegate {
+                                        this.Invoke((MethodInvoker)delegate
+                                        {
                                             this.Text = $"Scylla fixing: {fileNameNoExt}...";
                                         });
 

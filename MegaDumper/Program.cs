@@ -225,10 +225,10 @@ namespace Mega_Dumper
             try
             {
                 var ex = e.ExceptionObject as Exception;
-                string message = ex != null 
+                string message = ex != null
                     ? $"Unhandled exception: {ex.GetType().Name} - {ex.Message}\n{ex.StackTrace}"
                     : "Unknown unhandled exception";
-                
+
                 // Log to file
                 try
                 {
@@ -240,7 +240,7 @@ namespace Mega_Dumper
                 // Show message if possible (non-terminating exceptions)
                 if (!e.IsTerminating)
                 {
-                    MessageBox.Show($"An error occurred:\n\n{ex?.Message ?? "Unknown error"}\n\nThe operation will continue if possible.", 
+                    MessageBox.Show($"An error occurred:\n\n{ex?.Message ?? "Unknown error"}\n\nThe operation will continue if possible.",
                         "MegaDumper Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
@@ -256,9 +256,9 @@ namespace Mega_Dumper
             {
                 // Mark as observed to prevent crash
                 e.SetObserved();
-                
+
                 string message = $"Unobserved task exception: {e.Exception?.Message}\n{e.Exception?.StackTrace}";
-                
+
                 // Log to file
                 try
                 {
@@ -278,7 +278,7 @@ namespace Mega_Dumper
             try
             {
                 string message = $"UI thread exception: {e.Exception?.GetType().Name} - {e.Exception?.Message}\n{e.Exception?.StackTrace}";
-                
+
                 // Log to file
                 try
                 {
@@ -290,12 +290,12 @@ namespace Mega_Dumper
                 // Check if this is an AccessViolationException from Scylla
                 if (e.Exception is AccessViolationException)
                 {
-                    MessageBox.Show("A memory access error occurred in Scylla.dll. The operation was aborted but the application will continue.\n\nThis can happen when the target process exits or has invalid memory.", 
+                    MessageBox.Show("A memory access error occurred in Scylla.dll. The operation was aborted but the application will continue.\n\nThis can happen when the target process exits or has invalid memory.",
                         "Scylla Memory Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
                 else
                 {
-                    MessageBox.Show($"An error occurred:\n\n{e.Exception?.Message ?? "Unknown error"}\n\nClick OK to continue.", 
+                    MessageBox.Show($"An error occurred:\n\n{e.Exception?.Message ?? "Unknown error"}\n\nClick OK to continue.",
                         "MegaDumper Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }

@@ -13,10 +13,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Net;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using WinEnumerator;
@@ -796,7 +793,7 @@ namespace Mega_Dumper
                 catch { }
 
                 if (isNet) return ".NET";
-                
+
                 // If not .NET, check if it's Native PE
                 if (isPe || IsPEProcess(processid)) return "PE Native";
 
@@ -1341,7 +1338,7 @@ namespace Mega_Dumper
                     // Read the descriptor
                     byte[] descriptor = new byte[IMPORT_DESCRIPTOR_SIZE];
                     Array.Copy(fileData, importDirOffset + current, descriptor, 0, IMPORT_DESCRIPTOR_SIZE);
-                    
+
                     // Check if this is a null terminator (all zeros)
                     int nameRva = BitConverter.ToInt32(descriptor, 12);
                     if (nameRva == 0) break;
@@ -1394,7 +1391,7 @@ namespace Mega_Dumper
 
                 // Second pass: Write valid descriptors contiguously, then null terminator
                 int writeOffset = importDirOffset;
-                
+
                 // Write all valid descriptors
                 foreach (var descriptor in validDescriptors)
                 {
@@ -1404,7 +1401,7 @@ namespace Mega_Dumper
                         writeOffset += IMPORT_DESCRIPTOR_SIZE;
                     }
                 }
-                
+
                 // Write null terminator (20 zero bytes)
                 for (int i = 0; i < IMPORT_DESCRIPTOR_SIZE; i++)
                 {
@@ -1414,7 +1411,7 @@ namespace Mega_Dumper
                     }
                 }
                 writeOffset += IMPORT_DESCRIPTOR_SIZE;
-                
+
                 // Zero out any remaining space that was used by old descriptors
                 int oldEndOffset = importDirOffset + (allDescriptors.Count + 1) * IMPORT_DESCRIPTOR_SIZE;
                 for (int i = writeOffset; i < oldEndOffset && i < fileData.Length; i++)
@@ -2186,7 +2183,8 @@ namespace Mega_Dumper
 
                 if (restoreFilename)
                 {
-                    Action<string, string> renameFiles = (string sourceDir, string targetDir) => {
+                    Action<string, string> renameFiles = (string sourceDir, string targetDir) =>
+                    {
                         if (Directory.Exists(sourceDir))
                         {
                             DirectoryInfo di = new DirectoryInfo(sourceDir);
@@ -2315,7 +2313,8 @@ namespace Mega_Dumper
                                             continue;
                                         }
 
-                                        this.Invoke((MethodInvoker)delegate {
+                                        this.Invoke((MethodInvoker)delegate
+                                        {
                                             this.Text = $"Scylla fixing: {fileNameNoExt}...";
                                         });
 

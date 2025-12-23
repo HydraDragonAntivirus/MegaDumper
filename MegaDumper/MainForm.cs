@@ -147,15 +147,6 @@ namespace Mega_Dumper
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CloseHandle(IntPtr hObject);
 
-        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-        public static extern IntPtr LoadLibrary(string lpFileName);
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true, SetLastError = true)]
-        public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern bool FreeLibrary(IntPtr hModule);
-
         private const uint PROCESS_TERMINATE = 0x0001;
         private const uint PROCESS_CREATE_THREAD = 0x0002;
         private const uint PROCESS_SET_SESSIONID = 0x0004;
@@ -1809,42 +1800,9 @@ namespace Mega_Dumper
             return BitConverter.ToInt16(buffer, offset);
         }
 
-        private long GetRemoteCorExeMainAddress(int processId)
+        public bool FixImportandEntryPoint(long dumpVA, byte[] Dump)
         {
-            try
-            {
-                // 1. Get Local Address of _CorExeMain
-                IntPtr hMscoree = LoadLibrary("mscoree.dll");
-                if (hMscoree == IntPtr.Zero) return 0;
-                
-                IntPtr pLocalCorExeMain = GetProcAddress(hMscoree, "_CorExeMain");
-                if (pLocalCorExeMain == IntPtr.Zero) return 0;
-
-                long localOffset = (long)pLocalCorExeMain - (long)hMscoree;
-                FreeLibrary(hMscoree);
-
-                // 2. Get Remote Base Address of mscoree.dll
-                using (var proc = Process.GetProcessById(processId))
-                {
-                    foreach (ProcessModule mod in proc.Modules)
-                    {
-                        if (mod.ModuleName.Equals("mscoree.dll", StringComparison.OrdinalIgnoreCase))
-                        {
-                            return (long)mod.BaseAddress + localOffset;
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-               try { File.AppendAllText(Path.Combine("C:\\Dumps", "scylla_log.txt"), $"[GetRemoteCorExeMainAddress] Error: {ex.Message}\n"); } catch {}
-            }
-            return 0;
-        }
-
-        public bool FixImportandEntryPoint(long dumpVA, byte[] Dump, int processId = -1)
-        {
-            string logPath = Path.Combine("C:\\Dumps", "scylla_log.txt");
+            string logPath = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath) ?? "", "dumps", "scylla_log.txt");
             try { File.AppendAllText(logPath, $"[FixImport] Starting for VA 0x{dumpVA:X}...\n"); } catch {}
 
             if (Dump == null || Dump.Length < 0x40) return false;
@@ -1869,7 +1827,6 @@ namespace Mega_Dumper
             byte[] CorDllMain = { 0x5F, 0x43, 0x6F, 0x72, 0x44, 0x6C, 0x6C, 0x4D, 0x61, 0x69, 0x6E, 0x00 };
             int ThunkToFix = 0;
             long ThunkData = 0;
-            int ThunkToFixfo = 0; // Fixed: Variable scope issue
             int current = 0;
 
             while (impdiroffset + current + 20 <= Dump.Length)
@@ -1923,74 +1880,27 @@ namespace Mega_Dumper
                 current += 20;
             }
 
-            if ((ThunkToFix <= 0 || ThunkData == 0) && processId != -1)
-            {
-                // Fallback: Try to find _CorExeMain by runtime address if we couldn't find it via Import Directory
-                try 
-                {
-                    long remoteCorExeMain = GetRemoteCorExeMainAddress(processId);
-                    if (remoteCorExeMain > 0)
-                    {
-                        try { File.AppendAllText(logPath, $"[FixImport] Searching for remote _CorExeMain address: 0x{remoteCorExeMain:X}\n"); } catch {}
-                        
-                         // Scan Dump for this address (It should be in the IAT)
-                        for (int i = 0; i < Dump.Length - 8; i++)
-                        {
-                            // Check for 64-bit or 32-bit value
-                            bool found = false;
-                            if (isPE64)
-                            {
-                                if (BitConverter.ToInt64(Dump, i) == remoteCorExeMain) found = true;
-                            }
-                            else
-                            {
-                                if (BitConverter.ToInt32(Dump, i) == (int)remoteCorExeMain) found = true;
-                            }
-
-                            if (found)
-                            {
-                                // Verify this looks like valid IAT area (e.g. part of .rdata or .data)
-                                // For now, just assume found.
-                                int foundRVA = Offset2RVA(Dump, i);
-                                if (foundRVA != -1)
-                                {
-                                     ThunkToFix = foundRVA;
-                                     ThunkData = remoteCorExeMain;
-                                     ThunkToFixfo = i;
-                                     try { File.AppendAllText(logPath, $"[FixImport] Found _CorExeMain IAT Thunk via signature scan at FileOffset 0x{i:X} (RVA 0x{foundRVA:X})\n"); } catch {}
-                                     break;
-                                }
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex) 
-                {
-                     try { File.AppendAllText(logPath, $"[FixImport] Signature Scan Error: {ex.Message}\n"); } catch {}
-                }
-            }
-
             if (ThunkToFix <= 0 || ThunkData == 0) 
             {
                 try { File.AppendAllText(logPath, $"[FixImport] Error: Could not find mscoree thunk to fix.\n"); } catch {}
                 return false;
             }
 
-            int ThunkToFixfo_Final = (ThunkToFixfo > 0) ? ThunkToFixfo : RVA2Offset(Dump, ThunkToFix);
-            if (ThunkToFixfo_Final == -1) return false;
+            int ThunkToFixfo = RVA2Offset(Dump, ThunkToFix);
+            if (ThunkToFixfo == -1) return false;
 
             using var ms = new MemoryStream(Dump);
             BinaryWriter writer = new(ms);
 
-            // We already have ThunkData from scan or walk, so we can skip reading currentThunkValue if we found it via scan
-            // But if we found it via scan, ThunkToFixfo is set.
-            
-            // Just ensure header matches.
-            ms.Position = ThunkToFixfo_Final;
-            if (isPE64)
-                 writer.Write((long)ThunkData);
-            else
-                 writer.Write((int)ThunkData);
+            long currentThunkValue = isPE64 ? BitConverter.ToInt64(Dump, ThunkToFixfo) : BitConverter.ToInt32(Dump, ThunkToFixfo);
+            if (currentThunkValue <= 0 || RVA2Offset(Dump, (int)(currentThunkValue & 0xFFFFFFFF)) == -1)
+            {
+                ms.Position = ThunkToFixfo;
+                if (isPE64)
+                    writer.Write((long)ThunkData);
+                else
+                    writer.Write((int)ThunkData);
+            }
 
             int EntryPointOffset = PEOffset + 0x028;
             int EntryPoint = ReadInt32Safe(Dump, EntryPointOffset);
@@ -2573,8 +2483,7 @@ namespace Mega_Dumper
                                                                     bool IsExe = false;
                                                                     try {
                                                                         short characteristics = BitConverter.ToInt16(PeHeader, PEOffset + 0x16);
-                                                                        // Exe if ExecutableImage flag is set AND it is NOT a DLL
-                                                                        if ((characteristics & 0x0002) != 0 && !IsDll) IsExe = true;
+                                                                        if ((characteristics & 0x0002) != 0) IsExe = true;
                                                                     } catch {}
 
                                                                     if (IsDll) filename += ".dll";
@@ -2677,7 +2586,7 @@ namespace Mega_Dumper
                                                             rightrawsize = sizeofimage;
                                                         }
 
-                                                        FixImportandEntryPoint((long)(j + (ulong)k), virtualdump, (int)processId);
+                                                        FixImportandEntryPoint((long)(j + (ulong)k), virtualdump);
 
                                                         dumpdir = ddirs.nativedirname;
                                                         if (isNetFile)
@@ -2998,7 +2907,7 @@ namespace Mega_Dumper
                                                 int epOff = peOff + 0x28; // AddressOfEntryPoint
                                                 int oldEpRva = BitConverter.ToInt32(dumpBuffer, epOff);
                                                 
-                                                if (FixImportandEntryPoint((long)imageBase, dumpBuffer, (int)processId))
+                                                if (FixImportandEntryPoint((long)imageBase, dumpBuffer))
                                                 {
                                                     int newEpRva = BitConverter.ToInt32(dumpBuffer, epOff);
                                                     if (newEpRva != oldEpRva)

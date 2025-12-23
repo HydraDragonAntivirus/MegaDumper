@@ -133,7 +133,7 @@ namespace Mega_Dumper
             // 
             // isnet
             // 
-            this.isnet.Text = "Type";
+            this.isnet.Text = "PE";
             // 
             // location
             // 

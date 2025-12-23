@@ -2392,7 +2392,6 @@ namespace Mega_Dumper
                                                         int calculatedimagesize = sizeOfHeaders;
 
                                                         int rawsize, rawAddress, virtualsize, virtualAddress = 0;
-                                                        int calcrawsize = 0;
 
                                                         for (int i = 0; i < nrofsection; i++)
                                                         {

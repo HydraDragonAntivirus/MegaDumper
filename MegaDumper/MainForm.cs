@@ -1975,18 +1975,6 @@ namespace Mega_Dumper
                 return false;
             }
 
-            // Check for CLR Runtime Header (DataDirectory[14])
-            // If missing, this is not a .NET assembly, so skip mscoree fix without error.
-            int clrDirOffset = PEOffset + 24 + (isPE64 ? 224 : 208);
-            int clrRva = ReadInt32Safe(Dump, clrDirOffset);
-            int clrSize = ReadInt32Safe(Dump, clrDirOffset + 4);
-
-            if (clrRva == 0 || clrSize == 0)
-            {
-                // Not a .NET assembly (or effectively native)
-                return false;
-            }
-
             byte[] mscoreeAscii = { 0x6D, 0x73, 0x63, 0x6F, 0x72, 0x65, 0x65, 0x2E, 0x64, 0x6C, 0x6C, 0x00 };
             byte[] CorExeMain = { 0x5F, 0x43, 0x6F, 0x72, 0x45, 0x78, 0x65, 0x4D, 0x61, 0x69, 0x6E, 0x00 };
             byte[] CorDllMain = { 0x5F, 0x43, 0x6F, 0x72, 0x44, 0x6C, 0x6C, 0x4D, 0x61, 0x69, 0x6E, 0x00 };

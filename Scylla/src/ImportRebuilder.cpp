@@ -149,7 +149,7 @@ bool ImportRebuilder::createNewImportSection(std::map<DWORD_PTR, ImportModuleThu
 
 void ImportRebuilder::setFlagToIATSection(DWORD_PTR iatAddress)
 {
-	for (SIZE_T i = 0; i < listPeSection.size(); i++)
+	for (size_t i = 0; i < listPeSection.size(); i++)
 	{
 		if ((listPeSection[i].sectionHeader.VirtualAddress <= iatAddress) && ((listPeSection[i].sectionHeader.VirtualAddress + listPeSection[i].sectionHeader.Misc.VirtualSize) > iatAddress))
 		{

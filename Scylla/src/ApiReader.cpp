@@ -385,7 +385,7 @@ void ApiReader::parseExportTable(ModuleInfo *module, PIMAGE_NT_HEADERS pNtHeader
 	char *functionName = 0;
 	DWORD_PTR RVA = 0, VA = 0;
 	WORD ordinal = 0;
-	DWORD i = 0, j = 0;
+	WORD i = 0, j = 0;
 	bool withoutName;
 
 
@@ -514,12 +514,10 @@ bool ApiReader::isModuleLoadedInOwnProcess(ModuleInfo * module)
 {
 	for (unsigned int i = 0; i < ownModuleList.size(); i++)
 	{
-		if (module->modBaseAddr == ownModuleList[i].modBaseAddr)
+		if (!_wcsicmp(module->fullPath, ownModuleList[i].fullPath))
 		{
-			if (!_wcsicmp(module->fullPath, ownModuleList[i].fullPath))
-			{
-				return true;
-			}
+			//printf("isModuleLoadedInOwnProcess :: %s %s\n",module->fullPath,ownModuleList[i].fullPath);
+			return true;
 		}
 	}
 	return false;
@@ -910,16 +908,13 @@ void ApiReader::setMinMaxApiAddress(DWORD_PTR virtualAddress)
 	}
 }
 
-void ApiReader::readAndParseIAT(DWORD_PTR addressIAT, DWORD sizeIAT, std::map<DWORD_PTR, ImportModuleThunk> &moduleListNew)
+void  ApiReader::readAndParseIAT(DWORD_PTR addressIAT, DWORD sizeIAT, std::map<DWORD_PTR, ImportModuleThunk> &moduleListNew)
 {
 	moduleThunkList = &moduleListNew;
 	BYTE *dataIat = new BYTE[sizeIAT];
-	if (ProcessAccessHelp::readMemoryPartlyFromProcess(addressIAT, sizeIAT, dataIat))
+	if (readMemoryFromProcess(addressIAT,sizeIAT,dataIat))
 	{
-#ifdef DEBUG_COMMENTS
-		Scylla::debugLog.log(L"readAndParseIAT :: Read 0x%X bytes of IAT at " PRINTF_DWORD_PTR_FULL, sizeIAT, addressIAT);
-#endif
-		parseIAT(addressIAT, dataIat, sizeIAT);
+		parseIAT(addressIAT,dataIat,sizeIAT);
 	}
 	else
 	{
@@ -949,13 +944,13 @@ void ApiReader::parseIAT(DWORD_PTR addressIAT, BYTE * iatBuffer, SIZE_T size)
 #ifdef DEBUG_COMMENTS
 			Scylla::debugLog.log(L"min %p max %p address %p", minApiAddress, maxApiAddress, pIATAddress[i]);
 #endif
-            if ( (pIATAddress[i] >= minApiAddress) && (pIATAddress[i] <= maxApiAddress) )
+            if ( (pIATAddress[i] > minApiAddress) && (pIATAddress[i] < maxApiAddress) )
             {
 
                 apiFound = getApiByVirtualAddress(pIATAddress[i], &isSuspect);
 
 #ifdef DEBUG_COMMENTS
-				Scylla::debugLog.log(L"parseIAT :: Pointer %zu = " PRINTF_DWORD_PTR_FULL L" -> ApiFound %p", i, pIATAddress[i], apiFound);
+				Scylla::debugLog.log(L"apiFound %p address %p", apiFound, pIATAddress[i]);
 #endif
                 if (apiFound == 0)
                 {

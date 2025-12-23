@@ -1538,8 +1538,9 @@ namespace Mega_Dumper
             int nrofsection = BitConverter.ToInt16(input, PEOffset + 0x06);
             if (nrofsection <= 0 || nrofsection > 96) return -1;
 
-            short sizeOfOptionalHeader = BitConverter.ToInt16(input, PEOffset + 0x14);
-            int sectionTableStartOffset = PEOffset + 4 + 20 + sizeOfOptionalHeader;
+            // Assuming a standard 32-bit PE header structure, 0xF8 is a common offset
+            // to the start of the section table after the PE signature, COFF header, and optional header.
+            int sectionTableStartOffset = PEOffset + 0xF8;
 
             for (int i = 0; i < nrofsection; i++)
             {
@@ -1802,9 +1803,6 @@ namespace Mega_Dumper
 
         public bool FixImportandEntryPoint(long dumpVA, byte[] Dump)
         {
-            string logPath = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath) ?? "", "dumps", "scylla_log.txt");
-            try { File.AppendAllText(logPath, $"[FixImport] Starting for VA 0x{dumpVA:X}...\n"); } catch {}
-
             if (Dump == null || Dump.Length < 0x40) return false;
 
             int PEOffset = ReadInt32Safe(Dump, 0x3C);
@@ -1816,11 +1814,7 @@ namespace Mega_Dumper
 
             int ImportDirectoryRva = ReadInt32Safe(Dump, PEOffset + (isPE64 ? 0x090 : 0x080));
             int impdiroffset = RVA2Offset(Dump, ImportDirectoryRva);
-            if (impdiroffset == -1) 
-            {
-                try { File.AppendAllText(logPath, $"[FixImport] Error: Could not find Import Directory Offset for RVA 0x{ImportDirectoryRva:X}\n"); } catch {}
-                return false;
-            }
+            if (impdiroffset == -1) return false;
 
             byte[] mscoreeAscii = { 0x6D, 0x73, 0x63, 0x6F, 0x72, 0x65, 0x65, 0x2E, 0x64, 0x6C, 0x6C, 0x00 };
             byte[] CorExeMain = { 0x5F, 0x43, 0x6F, 0x72, 0x45, 0x78, 0x65, 0x4D, 0x61, 0x69, 0x6E, 0x00 };
@@ -1880,11 +1874,7 @@ namespace Mega_Dumper
                 current += 20;
             }
 
-            if (ThunkToFix <= 0 || ThunkData == 0) 
-            {
-                try { File.AppendAllText(logPath, $"[FixImport] Error: Could not find mscoree thunk to fix.\n"); } catch {}
-                return false;
-            }
+            if (ThunkToFix <= 0 || ThunkData == 0) return false;
 
             int ThunkToFixfo = RVA2Offset(Dump, ThunkToFix);
             if (ThunkToFixfo == -1) return false;
@@ -1908,8 +1898,7 @@ namespace Mega_Dumper
             if (EntryPoint <= 0 || RVA2Offset(Dump, EntryPoint) == -1)
             {
                 long realThunkAddress = dumpVA + ThunkToFix;
-                try { File.AppendAllText(logPath, $"[FixImport] Patched IAT Thunk at RVA 0x{ThunkToFix:X}, Address 0x{realThunkAddress:X}.\n"); } catch {}
-                try { File.AppendAllText(logPath, $"[FixImport] Searching for jump stub to 0x{realThunkAddress:X}...\n"); } catch {}
+                byte[] ThunkToFixbytes = BitConverter.GetBytes(isPE64 ? (ulong)realThunkAddress : (ulong)(uint)realThunkAddress);
 
                 if (isPE64)
                 {
@@ -1925,7 +1914,6 @@ namespace Mega_Dumper
                                 int EntrPointRVA = Offset2RVA(Dump, i);
                                 if (EntrPointRVA != -1)
                                 {
-                                    try { File.AppendAllText(logPath, $"[FixImport] Detected Entry Point at RVA 0x{EntrPointRVA:X} (File Offset 0x{i:X}). Patching...\n"); } catch {}
                                     ms.Position = EntryPointOffset;
                                     writer.Write(EntrPointRVA);
                                     break;
@@ -1946,7 +1934,6 @@ namespace Mega_Dumper
                             int EntrPointRVA = Offset2RVA(Dump, i);
                             if (EntrPointRVA != -1)
                             {
-                                try { File.AppendAllText(logPath, $"[FixImport] Detected Entry Point at RVA 0x{EntrPointRVA:X} (File Offset 0x{i:X}). Patching...\n"); } catch {}
                                 ms.Position = EntryPointOffset;
                                 writer.Write(EntrPointRVA);
                                 break;
@@ -2423,9 +2410,14 @@ namespace Mega_Dumper
 
                                                         if (calculatedimagesize > sizeofimage) sizeofimage = calculatedimagesize;
 
-                                                        // Memory dumper rawdump always produces a "fixed" dump (Raw layout = Virtual layout)
-                                                        // to correspond with the memory-read buffer.
-                                                        totalrawsize = sizeofimage;
+                                                        try
+                                                        {
+                                                            byte[] crap = new byte[totalrawsize];
+                                                        }
+                                                        catch
+                                                        {
+                                                            totalrawsize = sizeofimage;
+                                                        }
 
                                                         if (totalrawsize != 0)
                                                         {
@@ -2436,21 +2428,6 @@ namespace Mega_Dumper
                                                                 isok = ReadProcessMemoryW(hProcess, j + (ulong)k, rawdump, (UIntPtr)rawdump.Length, out BytesRead);
                                                                 if (isok)
                                                                 {
-                                                                    // Patch section headers in the rawdump buffer to match memory layout
-                                                                    for (int l = 0; l < nrofsection; l++)
-                                                                    {
-                                                                        int vSize = sections[l].virtual_size;
-                                                                        int vAddr = sections[l].virtual_address;
-                                                                        
-                                                                        // Set PointerToRawData = VirtualAddress, SizeOfRawData = VirtualSize
-                                                                        byte[] vSizeB = BitConverter.GetBytes(vSize);
-                                                                        byte[] vAddrB = BitConverter.GetBytes(vAddr);
-                                                                        
-                                                                        int hdrOff = PEOffset + 24 + sizeofoptionalheader + (0x28 * l);
-                                                                        Array.Copy(vSizeB, 0, rawdump, hdrOff + 16, 4);
-                                                                        Array.Copy(vAddrB, 0, rawdump, hdrOff + 20, 4);
-                                                                    }
-
                                                                     dumpdir = ddirs.nativedirname;
                                                                     if (isNetFile)
                                                                         dumpdir = ddirs.dumps;
@@ -2468,13 +2445,20 @@ namespace Mega_Dumper
                                                                     {
                                                                         File.WriteAllBytes(filename, rawdump);
                                                                         sessionDumpedFiles.Add(filename);
+
+                                                                        // Scylla Integration moved to post-processing
                                                                     }
-                                                                    catch { }
+                                                                    catch
+                                                                    {
+                                                                        // This part involves UI, cannot be called from a background thread directly
+                                                                    }
 
                                                                     CurrentCount++;
                                                                 }
                                                             }
-                                                            catch { }
+                                                            catch
+                                                            {
+                                                            }
                                                         }
 
                                                         byte[] virtualdump = new byte[sizeofimage];

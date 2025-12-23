@@ -1121,7 +1121,7 @@ namespace Mega_Dumper
                 if (isNet) return ".NET";
                 
                 // If not .NET, check if it's Native PE
-                if (isPe || IsPEProcess(processid)) return "Native";
+                if (isPe || IsPEProcess(processid)) return "PE Native";
 
                 return "Unchecked";
             }
@@ -2015,7 +2015,7 @@ namespace Mega_Dumper
         public void SetDirectoriesPath(ref DUMP_DIRECTORIES dpmdirs)
         {
             dpmdirs.dumps = Path.Combine("C:\\", "Dumps");
-            dpmdirs.nativedirname = Path.Combine(dpmdirs.dumps, "Native");
+            dpmdirs.nativedirname = Path.Combine(dpmdirs.dumps, ".NET Native");
             dpmdirs.sysdirname = Path.Combine(dpmdirs.dumps, "System");
             dpmdirs.unknowndirname = Path.Combine(dpmdirs.dumps, "UnknownName");
         }
@@ -2712,410 +2712,427 @@ namespace Mega_Dumper
                     {
                         if (MegaDumper.ScyllaBindings.IsAvailable)
                         {
-                            // DEBUG: Log the path of the loaded Scylla.dll
-                            try {
-                                foreach (System.Diagnostics.ProcessModule mod in System.Diagnostics.Process.GetCurrentProcess().Modules) {
-                                    if (mod.ModuleName.Equals("Scylla.dll", StringComparison.OrdinalIgnoreCase)) {
-                                          File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), $"[DEBUG] Loaded Scylla.dll from: {mod.FileName}\n");
-                                          break;
-                                    }
-                                }
-                            } catch {}
+							bool shouldScyfix = false;
+							string normalizedDumpPath = "";
+							try
+							{
+								normalizedDumpPath = Path.GetFullPath(ddirs.dumps).TrimEnd(Path.DirectorySeparatorChar);
+							}
+							catch {}
+							string cDumpsPath = @"C:\Dumps";
 
-                            // Collect all files to process
-                            HashSet<string> filesToScylla = new HashSet<string>(sessionDumpedFiles);
+							if (string.Equals(normalizedDumpPath, cDumpsPath, StringComparison.OrdinalIgnoreCase))
+							{
+								shouldScyfix = true; // It's C:\Dumps, so enable scyfix
+							}
 
-                            // Recursively scan the entire dumps directory structure to find any untracked rawdumps
-                            try {
-                                if (Directory.Exists(ddirs.dumps)) {
-                                    foreach (var f in Directory.GetFiles(ddirs.dumps, "rawdump_*.*", SearchOption.AllDirectories)) {
-                                        filesToScylla.Add(f);
-                                    }
-                                }
-                            } catch {}
+							if (shouldScyfix)
+							{
+								// DEBUG: Log the path of the loaded Scylla.dll
+								try {
+									foreach (System.Diagnostics.ProcessModule mod in System.Diagnostics.Process.GetCurrentProcess().Modules) {
+										if (mod.ModuleName.Equals("Scylla.dll", StringComparison.OrdinalIgnoreCase)) {
+											  File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), $"[DEBUG] Loaded Scylla.dll from: {mod.FileName}\n");
+											  break;
+										}
+									}
+								} catch {}
 
-                            foreach (string dumpedFile in filesToScylla)
-                            {
-                                if (!File.Exists(dumpedFile)) continue;
-                                try
-                                {
-                                    // Filename format: rawdump_ADDRESS.exe or vdump_ADDRESS.exe
-                                    string fileNameNoExt = Path.GetFileNameWithoutExtension(dumpedFile);
-                                    
-                                    // Only process rawdumps - skip vdumps (same ImageBase, redundant)
-                                    if (!fileNameNoExt.StartsWith("rawdump", StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        continue;
-                                    }
-                                    
-                                    // Update UI with progress
-                                    this.Invoke((MethodInvoker)delegate {
-                                        this.Text = $"Scylla fixing: {fileNameNoExt}...";
-                                    });
+								// Collect all files to process
+								HashSet<string> filesToScylla = new HashSet<string>(sessionDumpedFiles);
 
-                                    string hexAddress = fileNameNoExt.Split('_').Last();
-                                    
-                                    ulong imageBase = Convert.ToUInt64(hexAddress, 16);
-                                    
-                                    if (imageBase > 0)
-                                    {
-                                        string scyFixFilename = Path.ChangeExtension(dumpedFile, null) + "_scyfix" + Path.GetExtension(dumpedFile);
-                                        
-                                        // Ensure debug privileges
-                                        try
-                                        {
-                                            System.Diagnostics.Process.EnterDebugMode();
-                                            using (var p = System.Diagnostics.Process.GetProcessById((int)processId)) 
-                                            { 
-                                                if (p.HasExited) throw new Exception("Process has exited"); 
-                                            }
-                                        }
-                                        catch {}
+								// Recursively scan the entire dumps directory structure to find any untracked rawdumps
+								try {
+									if (Directory.Exists(ddirs.dumps)) {
+										foreach (var f in Directory.GetFiles(ddirs.dumps, "rawdump_*.*", SearchOption.AllDirectories)) {
+											filesToScylla.Add(f);
+										}
+									}
+								} catch {}
 
-                                        // We need EntryPoint. 
-                                        // Since we know ImageBase, we can read the EP RVA from the file header and add it.
-                                        ulong entryPoint = imageBase;
-                                        bool is64 = IntPtr.Size == 8; // Default to current process architecture
-                                        byte[] header = new byte[0x400];
-                                        using (FileStream fs = new FileStream(dumpedFile, FileMode.Open, FileAccess.Read))
-                                        {
-                                            fs.Read(header, 0, 0x400);
-                                        }
-                                        int peOffset = BitConverter.ToInt32(header, 0x3C);
-                                        if (peOffset > 0 && peOffset < 0x300)
-                                        {
-                                            int optHeaderOffset = peOffset + 4 + 20;
-                                            // Determine if target PE is 64-bit (0x20B = PE32+)
-                                            is64 = BitConverter.ToUInt16(header, optHeaderOffset) == 0x20B; 
-                                            uint epRva = BitConverter.ToUInt32(header, optHeaderOffset + 16);
-                                            entryPoint = imageBase + epRva;
-                                            
-                                            // Validate EntryPoint bounds (Logging only)
-                                            uint sizeOfImage = BitConverter.ToUInt32(header, optHeaderOffset + 56);
-                                            if (entryPoint < imageBase || entryPoint >= imageBase + sizeOfImage)
-                                            {
-                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                    $"[{DateTime.Now}] Warn: EntryPoint 0x{entryPoint:X} out of bounds (Base=0x{imageBase:X}, Size=0x{sizeOfImage:X}).\n");
-                                            }
+								foreach (string dumpedFile in filesToScylla)
+								{
+									if (!File.Exists(dumpedFile)) continue;
+									try
+									{
+										// Filename format: rawdump_ADDRESS.exe or vdump_ADDRESS.exe
+										string fileNameNoExt = Path.GetFileNameWithoutExtension(dumpedFile);
+										
+										// Only process rawdumps - skip vdumps (same ImageBase, redundant)
+										if (!fileNameNoExt.StartsWith("rawdump", StringComparison.OrdinalIgnoreCase))
+										{
+											continue;
+										}
+										
+										// Update UI with progress
+										this.Invoke((MethodInvoker)delegate {
+											this.Text = $"Scylla fixing: {fileNameNoExt}...";
+										});
 
-                                            // CRITICAL FIX: Patch FileAlignment to match SectionAlignment.
-                                            uint sectionAlignment = BitConverter.ToUInt32(header, optHeaderOffset + 32);
-                                            uint fileAlignment = BitConverter.ToUInt32(header, optHeaderOffset + 36);
-                                            
-                                            if (fileAlignment != sectionAlignment)
-                                            {
-                                                byte[] alignBytes = BitConverter.GetBytes(sectionAlignment);
-                                                Array.Copy(alignBytes, 0, header, optHeaderOffset + 36, 4);
-                                                
-                                                using (FileStream fsWrite = new FileStream(dumpedFile, FileMode.Open, FileAccess.Write))
-                                                {
-                                                    fsWrite.Write(header, 0, 0x400);
-                                                }
-                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                    $"[{DateTime.Now}] Patched FileAlignment from 0x{fileAlignment:X} to 0x{sectionAlignment:X} for {fileNameNoExt}\n");
-                                            }
-                                        }
-                                        
-                                        // Log PE architecture and check compatibility
-                                        File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                            $"[{DateTime.Now}] Starting Scylla for {Path.GetFileName(dumpedFile)} (Base=0x{imageBase:X}, PE={(!is64 ? "32-bit" : "64-bit")})...\n");
-                                        
-                                        // CRITICAL: Scylla DLL injection only works if Host and Target architectures match
-                                        // 64-bit MegaDumper -> can only dump 64-bit PEs (using Scylla.dll)
-                                        // 32-bit MegaDumper -> can only dump 32-bit PEs (using Scylla.dll)
-                                        
-                                        bool isHost64 = IntPtr.Size == 8;
-                                        
-                                        // Mismatch check removed - ScyllaBindings now handles x64 Host -> x86 Target via Scylla.dll (WoW64 support)
+										string hexAddress = fileNameNoExt.Split('_').Last();
+										
+										ulong imageBase = Convert.ToUInt64(hexAddress, 16);
+										
+										if (imageBase > 0)
+										{
+											string scyFixFilename = Path.ChangeExtension(dumpedFile, null) + "_scyfix" + Path.GetExtension(dumpedFile);
+											
+											// Ensure debug privileges
+											try
+											{
+												System.Diagnostics.Process.EnterDebugMode();
+												using (var p = System.Diagnostics.Process.GetProcessById((int)processId)) 
+												{ 
+													if (p.HasExited) throw new Exception("Process has exited"); 
+												}
+											}
+											catch {}
 
-                                        // OEP DETECTION STRATEGY (Thread Context):
-                                        // The most reliable way to find the OEP of a running process is to check where it is currently executing.
-                                        // We get the Instruction Pointer (RIP/EIP) from the main thread.
-                                        
-                                        ulong realOEP = 0;
-                                        try
-                                        {
-                                            // 1. Get Main Thread
-                                            using (var proc = System.Diagnostics.Process.GetProcessById((int)processId))
-                                            {
-                                                if (proc.Threads.Count > 0)
-                                                {
-                                                    // Use the first thread (usually main thread)
-                                                    var outputThread = proc.Threads[0];
-                                                    int threadId = outputThread.Id;
-                                                    
-                                                    // 2. Open Thread
-                                                    IntPtr hThread = OpenThread(0x0010 | 0x0008 | 0x0002, false, (uint)threadId); // READ_CONTEXT | QUERY | SUSPEND
-                                                    if (hThread != IntPtr.Zero)
-                                                    {
-                                                        try 
-                                                        {
-                                                            // Suspend to get consistent context
-                                                            SuspendThread(hThread);
-                                                            
-                                                            // Alloc CONTEXT
-                                                            if (is64)
-                                                            {
-                                                                CONTEXT64 ctx = new CONTEXT64();
-                                                                ctx.ContextFlags = 0x100002; // CONTEXT_CONTROL | CONTEXT_INTEGER
-                                                                if (GetThreadContext64(hThread, ref ctx))
-                                                                {
-                                                                    realOEP = ctx.Rip;
-                                                                    File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                                        $"[{DateTime.Now}] Detected OEP from Thread {threadId}: 0x{realOEP:X}\n");
-                                                                }
-                                                            }
-                                                            else
-                                                            {
-                                                                CONTEXT32 ctx = new CONTEXT32();
-                                                                ctx.ContextFlags = 0x10002; // CONTEXT_CONTROL | CONTEXT_INTEGER
-                                                                if (GetThreadContext32(hThread, ref ctx))
-                                                                {
-                                                                    realOEP = (ulong)ctx.Eip;
-                                                                    File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                                        $"[{DateTime.Now}] Detected OEP from Thread {threadId}: 0x{realOEP:X}\n");
-                                                                }
-                                                            }
-                                                        }
-                                                        finally
-                                                        {
-                                                            ResumeThread(hThread);
-                                                            CloseHandle(hThread);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        catch (Exception ctxEx)
-                                        {
-                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                $"[{DateTime.Now}] Failed to get Thread Context: {ctxEx.Message}. Fallback to Header EP.\n");
-                                        }
+											// We need EntryPoint. 
+											// Since we know ImageBase, we can read the EP RVA from the file header and add it.
+											ulong entryPoint = imageBase;
+											bool is64 = IntPtr.Size == 8; // Default to current process architecture
+											byte[] header = new byte[0x400];
+											using (FileStream fs = new FileStream(dumpedFile, FileMode.Open, FileAccess.Read))
+											{
+												fs.Read(header, 0, 0x400);
+											}
+											int peOffset = BitConverter.ToInt32(header, 0x3C);
+											if (peOffset > 0 && peOffset < 0x300)
+											{
+												int optHeaderOffset = peOffset + 4 + 20;
+												// Determine if target PE is 64-bit (0x20B = PE32+)
+												is64 = BitConverter.ToUInt16(header, optHeaderOffset) == 0x20B; 
+												uint epRva = BitConverter.ToUInt32(header, optHeaderOffset + 16);
+												entryPoint = imageBase + epRva;
+												
+												// Validate EntryPoint bounds (Logging only)
+												uint sizeOfImage = BitConverter.ToUInt32(header, optHeaderOffset + 56);
+												if (entryPoint < imageBase || entryPoint >= imageBase + sizeOfImage)
+												{
+													File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+														$"[{DateTime.Now}] Warn: EntryPoint 0x{entryPoint:X} out of bounds (Base=0x{imageBase:X}, Size=0x{sizeOfImage:X}).\n");
+												}
 
-                                        // Fallback if Thread Context failed (or returned 0)
-                                        ulong finalEntryPoint = (realOEP > 0) ? realOEP : entryPoint;
-                                        
-                                        // Final Safety Check on the Chosen EntryPoint
-                                        // If falling back to Header EP, we must ensure it's not the trap.
-                                        if (realOEP == 0) 
-                                        {
-                                            // Check header EP again? Or just trust Scylla auto-detect (0)?
-                                            // If Scylla auto-detect failed user, we might want to try Header EP but ONLY if valid memory.
-                                            // For now, let's try passing the Header EP if Thread failed, but user said '0' fails result.
-                                            // So if Header EP is used, we risk crash if untrapped.
-                                            // Let's assume Thread finding works for unpacked apps.
-                                        }
+												// CRITICAL FIX: Patch FileAlignment to match SectionAlignment.
+												uint sectionAlignment = BitConverter.ToUInt32(header, optHeaderOffset + 32);
+												uint fileAlignment = BitConverter.ToUInt32(header, optHeaderOffset + 36);
+												
+												if (fileAlignment != sectionAlignment)
+												{
+													byte[] alignBytes = BitConverter.GetBytes(sectionAlignment);
+													Array.Copy(alignBytes, 0, header, optHeaderOffset + 36, 4);
+													
+													using (FileStream fsWrite = new FileStream(dumpedFile, FileMode.Open, FileAccess.Write))
+													{
+														fsWrite.Write(header, 0, 0x400);
+													}
+													File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+														$"[{DateTime.Now}] Patched FileAlignment from 0x{fileAlignment:X} to 0x{sectionAlignment:X} for {fileNameNoExt}\n");
+												}
+											}
+											
+											// Log PE architecture and check compatibility
+											File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+												$"[{DateTime.Now}] Starting Scylla for {Path.GetFileName(dumpedFile)} (Base=0x{imageBase:X}, PE={(!is64 ? "32-bit" : "64-bit")})...\n");
+											
+											// CRITICAL: Scylla DLL injection only works if Host and Target architectures match
+											// 64-bit MegaDumper -> can only dump 64-bit PEs (using Scylla.dll)
+											// 32-bit MegaDumper -> can only dump 32-bit PEs (using Scylla.dll)
+											
+											bool isHost64 = IntPtr.Size == 8;
+											
+											// Mismatch check removed - ScyllaBindings now handles x64 Host -> x86 Target via Scylla.dll (WoW64 support)
 
-                                        // Single Scylla attempt - no retries
-                                        MegaDumper.ScyllaError scyResult = MegaDumper.ScyllaError.IatSearchError;
-                                        
-                                        try
-                                        {
-                                            // Check if process is still alive
-                                            try
-                                            {
-                                                using (var checkProc = System.Diagnostics.Process.GetProcessById((int)processId))
-                                                {
-                                                    if (checkProc.HasExited)
-                                                    {
-                                                        File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
-                                                            $"[{DateTime.Now}] Process exited, skipping Scylla fix.\n");
-                                                        scyResult = MegaDumper.ScyllaError.PidNotFound;
-                                                    }
-                                                }
-                                            }
-                                            catch
-                                            {
-                                                scyResult = MegaDumper.ScyllaError.PidNotFound;
-                                            }
+											// OEP DETECTION STRATEGY (Thread Context):
+											// The most reliable way to find the OEP of a running process is to check where it is currently executing.
+											// We get the Instruction Pointer (RIP/EIP) from the main thread.
+											
+											ulong realOEP = 0;
+											try
+											{
+												// 1. Get Main Thread
+												using (var proc = System.Diagnostics.Process.GetProcessById((int)processId))
+												{
+													if (proc.Threads.Count > 0)
+													{
+														// Use the first thread (usually main thread)
+														var outputThread = proc.Threads[0];
+														int threadId = outputThread.Id;
+														
+														// 2. Open Thread
+														IntPtr hThread = OpenThread(0x0010 | 0x0008 | 0x0002, false, (uint)threadId); // READ_CONTEXT | QUERY | SUSPEND
+														if (hThread != IntPtr.Zero)
+														{
+															try 
+															{
+																// Suspend to get consistent context
+																SuspendThread(hThread);
+																
+																// Alloc CONTEXT
+																if (is64)
+																{
+																	CONTEXT64 ctx = new CONTEXT64();
+																	ctx.ContextFlags = 0x100002; // CONTEXT_CONTROL | CONTEXT_INTEGER
+																	if (GetThreadContext64(hThread, ref ctx))
+																	{
+																		realOEP = ctx.Rip;
+																		File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+																			$"[{DateTime.Now}] Detected OEP from Thread {threadId}: 0x{realOEP:X}\n");
+																	}
+																}
+																else
+																{
+																	CONTEXT32 ctx = new CONTEXT32();
+																	ctx.ContextFlags = 0x10002; // CONTEXT_CONTROL | CONTEXT_INTEGER
+																	if (GetThreadContext32(hThread, ref ctx))
+																	{
+																		realOEP = (ulong)ctx.Eip;
+																		File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+																			$"[{DateTime.Now}] Detected OEP from Thread {threadId}: 0x{realOEP:X}\n");
+																	}
+																}
+															}
+															finally
+															{
+																ResumeThread(hThread);
+																CloseHandle(hThread);
+															}
+														}
+													}
+												}
+											}
+											catch (Exception ctxEx)
+											{
+												File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+													$"[{DateTime.Now}] Failed to get Thread Context: {ctxEx.Message}. Fallback to Header EP.\n");
+											}
 
-                                            if (scyResult != MegaDumper.ScyllaError.PidNotFound)
-                                            {
-                                                // Strategy: Try Advanced Search by default
-                                                scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
-                                                    processId,
-                                                    imageBase,
-                                                    finalEntryPoint,
-                                                    dumpedFile,
-                                                    scyFixFilename,
-                                                    advancedSearch: true,
-                                                    createNewIat: true);
-                                                
-                                                // If Thread-based OEP failed or crashed, try Header-based EP as fallback
-                                                if (scyResult != MegaDumper.ScyllaError.Success && finalEntryPoint != entryPoint)
-                                                {
-                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                        $"  Scylla failed with result {scyResult} using Thread OEP. Retrying with Header EP...\n");
-                                                        
-                                                     scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
-                                                        processId,
-                                                        imageBase,
-                                                        entryPoint,
-                                                        dumpedFile,
-                                                        scyFixFilename,
-                                                        advancedSearch: true,
-                                                        createNewIat: true);
-                                                }
-                                                
-                                                if (scyResult == MegaDumper.ScyllaError.Success)
-                                                {
-                                                    File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                        $"  Result: Success\n");
-                                                }
-                                                else
-                                                {
-                                                    File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                        $"  Result: {scyResult}\n");
-                                                }
-                                            }
-                                        }
-                                        catch (Exception scyEx)
-                                        {
-                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
-                                                $"  Exception: {scyEx.GetType().Name} - {scyEx.Message}\n");
-                                            scyResult = MegaDumper.ScyllaError.IatSearchError;
-                                        }
+											// Fallback if Thread Context failed (or returned 0)
+											ulong finalEntryPoint = (realOEP > 0) ? realOEP : entryPoint;
+											
+											// Final Safety Check on the Chosen EntryPoint
+											// If falling back to Header EP, we must ensure it's not the trap.
+											if (realOEP == 0) 
+											{
+												// Check header EP again? Or just trust Scylla auto-detect (0)?
+												// If Scylla auto-detect failed user, we might want to try Header EP but ONLY if valid memory.
+												// For now, let's try passing the Header EP if Thread failed, but user said '0' fails result.
+												// So if Header EP is used, we risk crash if untrapped.
+												// Let's assume Thread finding works for unpacked apps.
+											}
 
-                                        // FALLBACK STRATEGY: Scylla Native Dump
-                                        // Skip fallbacks for:
-                                        // - PidNotFound: Process is dead
-                                        // - ModuleNotFound: Module isn't in process list
-                                        // - IatSearchError: Standard search failed
-                                        bool skipFallbacks = (scyResult == MegaDumper.ScyllaError.PidNotFound) ||
-                                                            (scyResult == MegaDumper.ScyllaError.ModuleNotFound);
-                                        
-                                        if (skipFallbacks && scyResult != MegaDumper.ScyllaError.Success)
-                                        {
-                                            // Don't log for PidNotFound - already logged above
-                                            if (scyResult != MegaDumper.ScyllaError.PidNotFound)
-                                            {
-                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                    $"  Skipping fallbacks for {scyResult}\n");
-                                            }
-                                        }
-                                        
-                                        if (scyResult != MegaDumper.ScyllaError.Success && !skipFallbacks)
-                                        {
-                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                "  Standard fix failed. Attempting Scylla Native Dump Fallback...\n");
-                                            
-                                            string scyNativeDump = Path.Combine(Path.GetDirectoryName(dumpedFile), "scy_native_" + Path.GetFileName(dumpedFile));
-                                            
-                                            // Try native dump (using dumpedFile as template/hint for Scylla)
-                                            bool dumpSuccess = MegaDumper.ScyllaBindings.DumpProcessX64(processId, imageBase, finalEntryPoint, scyNativeDump, dumpedFile);
-                                            
-                                            if (dumpSuccess && File.Exists(scyNativeDump))
-                                            {
-                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                    $"  Native dump created: {Path.GetFileName(scyNativeDump)}. Retrying fix on native dump...\n");
-                                                
-                                                scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
-                                                    processId,
-                                                    imageBase,
-                                                    finalEntryPoint,
-                                                    scyNativeDump,
-                                                    scyFixFilename,
-                                                    advancedSearch: true,
-                                                    createNewIat: true);
-                                                
-                                                if (scyResult == MegaDumper.ScyllaError.Success)
-                                                {
-                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                         "  Fallback Success! Scyfix created from native Scylla dump.\n");
-                                                }
-                                                else
-                                                {
-                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                         $"  Fallback Fix Failed: {scyResult}\n");
-                                                }
-                                            }
-                                            else
-                                            {
-                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                    $"  Native dump fallback failed (PID: {processId}, Base: 0x{imageBase:X}).\n");
-                                            }
-                                        }
+											// Single Scylla attempt - no retries
+											MegaDumper.ScyllaError scyResult = MegaDumper.ScyllaError.IatSearchError;
+											
+											try
+											{
+												// Check if process is still alive
+												try
+												{
+													using (var checkProc = System.Diagnostics.Process.GetProcessById((int)processId))
+													{
+														if (checkProc.HasExited)
+														{
+															File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+																$"[{DateTime.Now}] Process exited, skipping Scylla fix.\n");
+															scyResult = MegaDumper.ScyllaError.PidNotFound;
+														}
+													}
+												}
+												catch
+												{
+													scyResult = MegaDumper.ScyllaError.PidNotFound;
+												}
 
-                                        // FINAL FALLBACK: Manual IAT Recovery from PE Header
-                                        // Skip this too if ModuleNotFound - manual IAT fix also needs module in process list.
-                                        if (scyResult != MegaDumper.ScyllaError.Success && !skipFallbacks)
-                                        {
-                                            File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                "  Native dump failed or not enough. Attempting Manual IAT Recovery from Header...\n");
-                                            
-                                            try
-                                            {
-                                                byte[] peData = File.ReadAllBytes(dumpedFile);
-                                                int peHead = BitConverter.ToInt32(peData, 0x3C);
-                                                int optHead = peHead + 4 + 20;
-                                                bool pe64 = BitConverter.ToUInt16(peData, optHead) == 0x20B;
-                                                int dataDirOffset = optHead + (pe64 ? 112 : 96);
-                                                
-                                                // Import Directory is Index 1
-                                                uint importRva = BitConverter.ToUInt32(peData, dataDirOffset + 8);
-                                                uint importSize = BitConverter.ToUInt32(peData, dataDirOffset + 12);
-                                                
-                                                // IAT Directory is Index 12
-                                                uint iatRva = BitConverter.ToUInt32(peData, dataDirOffset + (12 * 8));
-                                                uint iatSize = BitConverter.ToUInt32(peData, dataDirOffset + (12 * 8) + 4);
+												if (scyResult != MegaDumper.ScyllaError.PidNotFound)
+												{
+													// Strategy: Try Advanced Search by default
+													scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
+														processId,
+														imageBase,
+														finalEntryPoint,
+														dumpedFile,
+														scyFixFilename,
+														advancedSearch: true,
+														createNewIat: true);
+													
+													// If Thread-based OEP failed or crashed, try Header-based EP as fallback
+													if (scyResult != MegaDumper.ScyllaError.Success && finalEntryPoint != entryPoint)
+													{
+														 File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+															$"  Scylla failed with result {scyResult} using Thread OEP. Retrying with Header EP...\n");
+															
+														 scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
+															processId,
+															imageBase,
+															entryPoint,
+															dumpedFile,
+															scyFixFilename,
+															advancedSearch: true,
+															createNewIat: true);
+													}
+													
+													if (scyResult == MegaDumper.ScyllaError.Success)
+													{
+														File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+															$"  Result: Success\n");
+													}
+													else
+													{
+														File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+															$"  Result: {scyResult}\n");
+													}
+												}
+											}
+											catch (Exception scyEx)
+											{
+												File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+													$"  Exception: {scyEx.GetType().Name} - {scyEx.Message}\n");
+												scyResult = MegaDumper.ScyllaError.IatSearchError;
+											}
 
-                                                if (iatRva > 0 && iatSize > 0)
-                                                {
-                                                    File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                        $"  Found IAT in Header: RVA=0x{iatRva:X}, Size=0x{iatSize:X}. Calling IatFix directly...\n");
-                                                    
-                                                    scyResult = MegaDumper.ScyllaBindings.IatFix(
-                                                        processId,
-                                                        imageBase,
-                                                        (UIntPtr)(imageBase + iatRva),
-                                                        iatSize,
-                                                        true,
-                                                        dumpedFile,
-                                                        scyFixFilename);
-                                                    
-                                                    if (scyResult == MegaDumper.ScyllaError.Success)
-                                                    {
-                                                        File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                            "  Manual IAT Recovery Success! Scyfix created.\n");
-                                                    }
-                                                    else
-                                                    {
-                                                        File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                            $"  Manual IAT Fix Failed: {scyResult}\n");
-                                                    }
-                                                }
-                                                else
-                                                {
-                                                     File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                        "  No IAT/Imports found in PE Header data directory.\n");
-                                                }
-                                            }
-                                            catch (Exception headerEx)
-                                            {
-                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
-                                                    $"  Error during manual IAT recovery: {headerEx.Message}\n");
-                                            }
-                                        }
+											// FALLBACK STRATEGY: Scylla Native Dump
+											// Skip fallbacks for:
+											// - PidNotFound: Process is dead
+											// - ModuleNotFound: Module isn't in process list
+											// - IatSearchError: Standard search failed
+											bool skipFallbacks = (scyResult == MegaDumper.ScyllaError.PidNotFound) ||
+																(scyResult == MegaDumper.ScyllaError.ModuleNotFound);
+											
+											if (skipFallbacks && scyResult != MegaDumper.ScyllaError.Success)
+											{
+												// Don't log for PidNotFound - already logged above
+												if (scyResult != MegaDumper.ScyllaError.PidNotFound)
+												{
+													File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+														$"  Skipping fallbacks for {scyResult}\n");
+												}
+											}
+											
+											if (scyResult != MegaDumper.ScyllaError.Success && !skipFallbacks)
+											{
+												File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+													"  Standard fix failed. Attempting Scylla Native Dump Fallback...\n");
+												
+												string scyNativeDump = Path.Combine(Path.GetDirectoryName(dumpedFile), "scy_native_" + Path.GetFileName(dumpedFile));
+												
+												// Try native dump (using dumpedFile as template/hint for Scylla)
+												bool dumpSuccess = MegaDumper.ScyllaBindings.DumpProcessX64(processId, imageBase, finalEntryPoint, scyNativeDump, dumpedFile);
+												
+												if (dumpSuccess && File.Exists(scyNativeDump))
+												{
+													File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+														$"  Native dump created: {Path.GetFileName(scyNativeDump)}. Retrying fix on native dump...\n");
+													
+													scyResult = MegaDumper.ScyllaBindings.FixImportsAutoDetect(
+														processId,
+														imageBase,
+														finalEntryPoint,
+														scyNativeDump,
+														scyFixFilename,
+														advancedSearch: true,
+														createNewIat: true);
+													
+													if (scyResult == MegaDumper.ScyllaError.Success)
+													{
+														 File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+															 "  Fallback Success! Scyfix created from native Scylla dump.\n");
+													}
+													else
+													{
+														 File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+															 $"  Fallback Fix Failed: {scyResult}\n");
+													}
+												}
+												else
+												{
+													File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+														$"  Native dump fallback failed (PID: {processId}, Base: 0x{imageBase:X}).\n");
+												}
+											}
 
-                                        if (scyResult == MegaDumper.ScyllaError.Success)
-                                        {
-                                            try
-                                            {
-                                                SanitizeScyfixFile(scyFixFilename);
-                                            }
-                                            catch (Exception sanitizeEx)
-                                            {
-                                                File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
-                                                    $"  Warning: SanitizeScyfixFile failed: {sanitizeEx.Message}\n");
-                                            }
-                                        }
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                     try { File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), $"Error processing {Path.GetFileName(dumpedFile)}: {ex.Message}\n"); } catch {}
-                                }
-                            }
+											// FINAL FALLBACK: Manual IAT Recovery from PE Header
+											// Skip this too if ModuleNotFound - manual IAT fix also needs module in process list.
+											if (scyResult != MegaDumper.ScyllaError.Success && !skipFallbacks)
+											{
+												File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+													"  Native dump failed or not enough. Attempting Manual IAT Recovery from Header...\n");
+												
+												try
+												{
+													byte[] peData = File.ReadAllBytes(dumpedFile);
+													int peHead = BitConverter.ToInt32(peData, 0x3C);
+													int optHead = peHead + 4 + 20;
+													bool pe64 = BitConverter.ToUInt16(peData, optHead) == 0x20B;
+													int dataDirOffset = optHead + (pe64 ? 112 : 96);
+													
+													// Import Directory is Index 1
+													uint importRva = BitConverter.ToUInt32(peData, dataDirOffset + 8);
+													uint importSize = BitConverter.ToUInt32(peData, dataDirOffset + 12);
+													
+													// IAT Directory is Index 12
+													uint iatRva = BitConverter.ToUInt32(peData, dataDirOffset + (12 * 8));
+													uint iatSize = BitConverter.ToUInt32(peData, dataDirOffset + (12 * 8) + 4);
+
+													if (iatRva > 0 && iatSize > 0)
+													{
+														File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+															$"  Found IAT in Header: RVA=0x{iatRva:X}, Size=0x{iatSize:X}. Calling IatFix directly...\n");
+														
+														scyResult = MegaDumper.ScyllaBindings.IatFix(
+															processId,
+															imageBase,
+															(UIntPtr)(imageBase + iatRva),
+															iatSize,
+															true,
+															dumpedFile,
+															scyFixFilename);
+														
+														if (scyResult == MegaDumper.ScyllaError.Success)
+														{
+															File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+																"  Manual IAT Recovery Success! Scyfix created.\n");
+														}
+														else
+														{
+															File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+																$"  Manual IAT Fix Failed: {scyResult}\n");
+														}
+													}
+													else
+													{
+														 File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+															"  No IAT/Imports found in PE Header data directory.\n");
+													}
+												}
+												catch (Exception headerEx)
+												{
+													File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), 
+														$"  Error during manual IAT recovery: {headerEx.Message}\n");
+												}
+											}
+
+											if (scyResult == MegaDumper.ScyllaError.Success)
+											{
+												try
+												{
+													SanitizeScyfixFile(scyFixFilename);
+												}
+												catch (Exception sanitizeEx)
+												{
+													File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"),
+														$"  Warning: SanitizeScyfixFile failed: {sanitizeEx.Message}\n");
+												}
+											}
+										}
+									}
+									catch (Exception ex)
+									{
+										 try { File.AppendAllText(Path.Combine(ddirs.dumps, "scylla_log.txt"), $"Error processing {Path.GetFileName(dumpedFile)}: {ex.Message}\n"); } catch {}
+									}
+								}
+							}
                         }
                         else
                         {

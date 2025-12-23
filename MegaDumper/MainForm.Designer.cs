@@ -460,7 +460,7 @@ namespace Mega_Dumper
             this.dumpNativeToolStripMenuItem.CheckOnClick = true;
             this.dumpNativeToolStripMenuItem.Name = "dumpNativeToolStripMenuItem";
             this.dumpNativeToolStripMenuItem.Size = new System.Drawing.Size(191, 22);
-            this.dumpNativeToolStripMenuItem.Text = "Dump native";
+            this.dumpNativeToolStripMenuItem.Text = "Dump .NET Native";
             // 
             // autoRefreshToolStripMenuItem
             // 

@@ -1152,23 +1152,18 @@ bool PeParser::dumpProcess(DWORD_PTR modBase, DWORD_PTR entryPoint, const WCHAR 
 
 void PeParser::setEntryPointVa(DWORD_PTR entryPoint)
 {
-	// Safety check: Ensure entryPoint > moduleBaseAddress to prevent underflow
-	if (entryPoint > moduleBaseAddress)
-	{
-		DWORD entryPointRva = (DWORD)(entryPoint - moduleBaseAddress);
-		setEntryPointRva(entryPointRva);
-	}
-	// If entryPoint <= moduleBaseAddress, keep the original entry point from the PE header
+	DWORD entryPointRva = (DWORD)(entryPoint - moduleBaseAddress);
+
+	setEntryPointRva(entryPointRva);
 }
 
 void PeParser::setEntryPointRva(DWORD entryPoint)
 {
-	// Safety check: Only set entry point if we have valid headers
-	if (isPE32() && pNTHeader32)
+	if (isPE32())
 	{
 		pNTHeader32->OptionalHeader.AddressOfEntryPoint = entryPoint;
 	}
-	else if (isPE64() && pNTHeader64)
+	else if (isPE64())
 	{
 		pNTHeader64->OptionalHeader.AddressOfEntryPoint = entryPoint;
 	}

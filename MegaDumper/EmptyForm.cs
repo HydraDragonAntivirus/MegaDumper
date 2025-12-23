@@ -442,8 +442,7 @@ namespace Mega_Dumper
             this.SuspendLayout();
             textBox1.Text = "İşlem yapılıyor, lütfen bekleyin...";
 
-            string result = await Task.Run(() =>
-            {
+            string result = await Task.Run(() => {
                 if (whattodo == 1)
                     return HoockDetect();
                 else if (whattodo == 2)

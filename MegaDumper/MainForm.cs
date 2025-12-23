@@ -2388,10 +2388,7 @@ namespace Mega_Dumper
                                                     System.Diagnostics.Debug.WriteLine($"Found PE at {(j + (ulong)k):X8}, Sections: {nrofsection}");
                                                     if (nrofsection > 0 && nrofsection < 100) // Sanity check for number of sections
                                                     {
-                                                        bool isNetFile = true;
                                                         string dumpdir = "";
-                                                        if (NetMetadata == 0)
-                                                            isNetFile = false;
 
                                                         // Read section alignment values directly from memory to ensure accuracy
                                                         byte[] alignmentBytes = new byte[8];

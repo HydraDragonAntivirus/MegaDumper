@@ -13,10 +13,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Net;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using WinEnumerator;
@@ -369,8 +366,7 @@ namespace Mega_Dumper
             }
 
             // The core dumping logic is already in DumpProcessLogic and is UI-agnostic.
-            // Passed null for moduleMap as CLI might not need advanced naming or can be extended later
-            string result = await Task.Run(() => DumpProcessLogic(processId, ddirs, true /* dumpNative */, true /* restoreFilename */, null));
+            string result = await Task.Run(() => DumpProcessLogic(processId, ddirs, true /* dumpNative */, true /* restoreFilename */));
             return result;
         }
 
@@ -1185,30 +1181,13 @@ namespace Mega_Dumper
                 return;
             }
 
-            // =================== FIX START: MODULE MAPPING ===================
-            // Pre-fetch module names to solve "UnknownName" issues for native files.
-            // If the header dump is slightly off, we can still know the name by address.
-            Dictionary<ulong, string> moduleMap = new Dictionary<ulong, string>();
-            try
-            {
-                Process p = Process.GetProcessById((int)processId);
-                foreach (ProcessModule m in p.Modules)
-                {
-                    // key: BaseAddress, value: ModuleName
-                    if (!moduleMap.ContainsKey((ulong)m.BaseAddress))
-                        moduleMap.Add((ulong)m.BaseAddress, m.ModuleName);
-                }
-            }
-            catch { }
-            // =================== FIX END =====================
-
             string originalTitle = Text;
             Text = "Dumping process... please wait.";
             Cursor = Cursors.WaitCursor;
 
             try
             {
-                string result = await Task.Run(() => DumpProcessLogic(processId, ddirs, dumpNative, restoreFilename, moduleMap));
+                string result = await Task.Run(() => DumpProcessLogic(processId, ddirs, dumpNative, restoreFilename));
                 MessageBox.Show(result, "Success!", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
@@ -1772,7 +1751,7 @@ namespace Mega_Dumper
             }
         }
 
-        private unsafe string DumpProcessLogic(uint processId, DUMP_DIRECTORIES ddirs, bool dumpNative, bool restoreFilename, Dictionary<ulong, string> moduleMap = null)
+        private unsafe string DumpProcessLogic(uint processId, DUMP_DIRECTORIES ddirs, bool dumpNative, bool restoreFilename)
         {
             IntPtr hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, 0, processId);
             List<string> sessionDumpedFiles = new List<string>();
@@ -2066,22 +2045,6 @@ namespace Mega_Dumper
                                                         byte[] virtualdump = new byte[sizeofimage];
                                                         Array.Copy(PeHeader, virtualdump, pagesizeInt);
 
-                                                        // =================== FIX START: HEADER PATCHING ===================
-                                                        // Patch FileAlignment to match SectionAlignment.
-                                                        // In memory dumps (virtual layout), FileAlignment is effectively equal to SectionAlignment.
-                                                        // This helps tools like FileVersionInfo read the resources correctly from the dump.
-                                                        try
-                                                        {
-                                                            int sectionAlignOffset = PEOffset + 24 + 32;
-                                                            int fileAlignOffset = PEOffset + 24 + 36;
-                                                            if (fileAlignOffset + 4 < virtualdump.Length)
-                                                            {
-                                                                Array.Copy(virtualdump, sectionAlignOffset, virtualdump, fileAlignOffset, 4);
-                                                            }
-                                                        }
-                                                        catch { }
-                                                        // =================== FIX END =====================
-
                                                         int rightrawsize = 0;
                                                         for (int l = 0; l < nrofsection; l++)
                                                         {
@@ -2159,30 +2122,9 @@ namespace Mega_Dumper
 
                                                         dumpdir = ddirs.dumps;
 
-                                                        // =================== FIX START: NAMING LOGIC ===================
-                                                        string friendlyName = "";
-                                                        ulong moduleBaseAddr = j + (ulong)k;
-                                                        if (moduleMap != null && moduleMap.ContainsKey(moduleBaseAddr))
-                                                        {
-                                                            friendlyName = moduleMap[moduleBaseAddr];
-                                                        }
-
-                                                        if (!string.IsNullOrEmpty(friendlyName))
-                                                        {
-                                                            // Use the actual module name if available (avoids UnknownName)
-                                                            // We strip .exe/.dll extension first to avoid duplication logic later
-                                                            string ext = Path.GetExtension(friendlyName);
-                                                            string nameNoExt = Path.GetFileNameWithoutExtension(friendlyName);
-                                                            filename = dumpdir + "\\" + nameNoExt + "_" + moduleBaseAddr.ToString("X");
-                                                        }
-                                                        else
-                                                        {
-                                                            // Fallback to vdump
-                                                            filename = dumpdir + "\\vdump_" + moduleBaseAddr.ToString("X");
-                                                            if (File.Exists(filename))
-                                                                filename = dumpdir + "\\vdump" + CurrentCount.ToString() + "_" + moduleBaseAddr.ToString("X");
-                                                        }
-                                                        // =================== FIX END =====================
+                                                        filename = dumpdir + "\\vdump_" + (j + (ulong)k).ToString("X");
+                                                        if (File.Exists(filename))
+                                                            filename = dumpdir + "\\vdump" + CurrentCount.ToString() + "_" + (j + (ulong)k).ToString("X");
 
                                                         if (IsDll)
                                                             filename += ".dll";
@@ -2241,7 +2183,8 @@ namespace Mega_Dumper
 
                 if (restoreFilename)
                 {
-                    Action<string, string> renameFiles = (string sourceDir, string targetDir) => {
+                    Action<string, string> renameFiles = (string sourceDir, string targetDir) =>
+                    {
                         if (Directory.Exists(sourceDir))
                         {
                             DirectoryInfo di = new DirectoryInfo(sourceDir);
@@ -2256,25 +2199,10 @@ namespace Mega_Dumper
                                     bool isDotNet = IsDotNetAssembly(fi.FullName);
 
                                     // NEW LOGIC: Strict sorting rules
-                                    // 1. Unknown files (no original filename) -> UnknownName OR check module map name
+                                    // 1. Unknown files (no original filename) -> UnknownName
                                     if (string.IsNullOrEmpty(info.OriginalFilename))
                                     {
-                                        // =================== FIX START: SORTING LOGIC ===================
-                                        // If we don't have version info (common for native/packed apps),
-                                        // check if we gave it a friendly name from the Module List.
-                                        // If the file starts with "vdump_", it means we failed to identify it.
-                                        // If it has a real name (e.g. "kernel32_7FF..."), keep it in dumps/root.
-                                        if (fi.Name.StartsWith("vdump_", StringComparison.OrdinalIgnoreCase))
-                                        {
-                                            finalDir = ddirs.unknowndirname;
-                                        }
-                                        else
-                                        {
-                                            // It has a recognized name, so we treat it as valid.
-                                            // Default to root dumps folder to avoid confusing users.
-                                            finalDir = ddirs.dumps;
-                                        }
-                                        // =================== FIX END =====================
+                                        finalDir = ddirs.unknowndirname;
                                     }
                                     else if (isMicrosoft)
                                     {
@@ -2321,13 +2249,7 @@ namespace Mega_Dumper
                                     else
                                     {
                                         // Move unknown to unknown folder
-                                        try
-                                        {
-                                            // Only move if finalDir is different from current dir
-                                            if (Path.GetFullPath(finalDir) != Path.GetFullPath(fi.DirectoryName))
-                                                File.Move(fi.FullName, Path.Combine(finalDir, fi.Name));
-                                        }
-                                        catch { }
+                                        try { File.Move(fi.FullName, Path.Combine(ddirs.unknowndirname, fi.Name)); } catch { }
                                     }
                                 }
                                 catch
@@ -2375,9 +2297,9 @@ namespace Mega_Dumper
                                 {
                                     if (!File.Exists(dumpedFile)) continue;
 
-                                    // NEW LOGIC: SKIP SCYLLA FOR .NET FILES
-                                    // "Scylla fixes only for non-.NET"
-                                    if (IsDotNetAssembly(dumpedFile))
+                                    // NEW LOGIC: SKIP SCYLLA FOR NON-.NET FILES
+                                    // "Scylla fixes only for .NET"
+                                    if (!IsDotNetAssembly(dumpedFile))
                                     {
                                         continue;
                                     }
@@ -2391,7 +2313,8 @@ namespace Mega_Dumper
                                             continue;
                                         }
 
-                                        this.Invoke((MethodInvoker)delegate {
+                                        this.Invoke((MethodInvoker)delegate
+                                        {
                                             this.Text = $"Scylla fixing: {fileNameNoExt}...";
                                         });
 
@@ -3216,6 +3139,7 @@ namespace Mega_Dumper
                 }
             }
         }
+
         private void NToolStripMenuItemClick(object sender, EventArgs e)
         {
             if (lvprocesslist.SelectedIndices.Count > 0)

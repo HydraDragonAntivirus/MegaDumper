@@ -805,7 +805,7 @@ namespace Mega_Dumper
                 catch { }
 
                 if (isNet) return ".NET";
-                
+
                 // If not .NET, check if it's Native PE
                 if (isPe || IsPEProcess(processid)) return "Native";
 
@@ -1237,7 +1237,7 @@ namespace Mega_Dumper
             // This works for both PE32 (32-bit) and PE32+ (64-bit)
             if (input.Length < PEOffset + 0x14 + 2) return -1;
             short sizeOfOptionalHeader = BitConverter.ToInt16(input, PEOffset + 0x14);
-            
+
             // Section table starts after: PE signature (4) + COFF header (20) + Optional header
             int sectionTableStartOffset = PEOffset + 4 + 20 + sizeOfOptionalHeader;
 
@@ -1366,7 +1366,7 @@ namespace Mega_Dumper
                     // Read the descriptor
                     byte[] descriptor = new byte[IMPORT_DESCRIPTOR_SIZE];
                     Array.Copy(fileData, importDirOffset + current, descriptor, 0, IMPORT_DESCRIPTOR_SIZE);
-                    
+
                     // Check if this is a null terminator (all zeros)
                     int nameRva = BitConverter.ToInt32(descriptor, 12);
                     if (nameRva == 0)
@@ -1421,7 +1421,7 @@ namespace Mega_Dumper
 
                 // Second pass: Write valid descriptors contiguously, then null terminator
                 int writeOffset = importDirOffset;
-                
+
                 // Write all valid descriptors
                 foreach (var descriptor in validDescriptors)
                 {
@@ -1431,7 +1431,7 @@ namespace Mega_Dumper
                         writeOffset += IMPORT_DESCRIPTOR_SIZE;
                     }
                 }
-                
+
                 // Write null terminator (20 zero bytes)
                 for (int i = 0; i < IMPORT_DESCRIPTOR_SIZE; i++)
                 {
@@ -2018,7 +2018,7 @@ namespace Mega_Dumper
 
                                                             int toadd = virtualsize % sectionalignment;
                                                             if (toadd != 0) toadd = sectionalignment - toadd;
-                                                            
+
                                                             // Correctly calculate total size by finding the end of the last section
 
                                                             int sectionEnd = virtualAddress + virtualsize + toadd;
@@ -2079,6 +2079,27 @@ namespace Mega_Dumper
                                                         // --- VDUMP BLOCK ---
                                                         byte[] virtualdump = new byte[sizeofimage];
                                                         Array.Copy(PeHeader, virtualdump, pagesizeInt);
+
+                                                        // =================== FIX START ===================
+                                                        // Fix PE Header in the virtual dump to match the new layout.
+                                                        // Since this is a Virtual Dump (Raw == Virtual), we must:
+                                                        // 1. Update SizeOfImage to the actual size we calculated.
+                                                        // 2. Update FileAlignment to match SectionAlignment (usually 0x1000).
+                                                        // This prevents "small defects" where parsers reject the file due to alignment mismatch.
+                                                        using (BinaryWriter headerWriter = new BinaryWriter(new MemoryStream(virtualdump)))
+                                                        {
+                                                            // OptionalHeader starts at PEOffset + 4 (Sig) + 20 (FileHeader) = PEOffset + 24
+                                                            int optionalHeaderStart = PEOffset + 24;
+
+                                                            // Update FileAlignment (Offset 0x24 in OptionalHeader) to match SectionAlignment
+                                                            headerWriter.BaseStream.Position = optionalHeaderStart + 0x24;
+                                                            headerWriter.Write(sectionalignment);
+
+                                                            // Update SizeOfImage (Offset 0x38 in OptionalHeader)
+                                                            headerWriter.BaseStream.Position = optionalHeaderStart + 0x38;
+                                                            headerWriter.Write(sizeofimage);
+                                                        }
+                                                        // =================== FIX END =====================
 
                                                         int rightrawsize = 0;
                                                         for (int l = 0; l < nrofsection; l++)
@@ -2340,7 +2361,7 @@ namespace Mega_Dumper
                                     if (!string.IsNullOrEmpty(info.OriginalFilename))
                                     {
                                         string safeName = string.Concat(info.OriginalFilename.Where(c => !Path.GetInvalidFileNameChars().Contains(c)));
-                                        
+
                                         // Preserve _scyfix suffix if present
                                         if (fi.Name.Contains("_scyfix"))
                                         {

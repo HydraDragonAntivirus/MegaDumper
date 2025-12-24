@@ -66,9 +66,7 @@
     <Compile Update="InstalledFramework.cs">
       <SubType>Form</SubType>
     </Compile>
-    <Compile Update="MainForm.cs">
-      <SubType>Form</SubType>
-    </Compile>
+    <Compile Update="MainForm.cs" />
     <Compile Update="ViewWindowsHoocks.cs">
       <SubType>Form</SubType>
     </Compile>

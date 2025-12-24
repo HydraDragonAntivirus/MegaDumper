@@ -1655,7 +1655,7 @@ namespace Mega_Dumper
         public void SetDirectoriesPath(ref DUMP_DIRECTORIES dpmdirs)
         {
             dpmdirs.dumps = Path.Combine("C:\\", "Dumps");
-            dpmdirs.nativedirname = Path.Combine(dpmdirs.dumps, "Native");
+            dpmdirs.nativedirname = dpmdirs.dumps; // dpmdirs.nativedirname = Path.Combine(dpmdirs.dumps, "Native");
             dpmdirs.sysdirname = Path.Combine(dpmdirs.dumps, "System");
             dpmdirs.unknowndirname = Path.Combine(dpmdirs.dumps, "UnknownName");
         }
@@ -2079,92 +2079,6 @@ namespace Mega_Dumper
                                                         // --- VDUMP BLOCK ---
                                                         byte[] virtualdump = new byte[sizeofimage];
                                                         Array.Copy(PeHeader, virtualdump, pagesizeInt);
-
-                                                        // =================== REAL FIX START ===================
-                                                        uint secAlign = 0x1000;
-                                                        uint fileAlign = 0x200;
-
-                                                        uint AlignUp(uint value, uint alignment)
-                                                        {
-                                                            return (value + alignment - 1) & ~(alignment - 1);
-                                                        }
-
-                                                        using (BinaryWriter bwFix = new BinaryWriter(new MemoryStream(virtualdump)))
-                                                        {
-                                                            // --------------------------------
-                                                            // PE header offsets
-                                                            // --------------------------------
-                                                            int fileHdrOff = PEOffset + 4;
-                                                            int optHdrOff = fileHdrOff + 20;
-
-                                                            // --------------------------------
-                                                            // Fix OptionalHeader alignments
-                                                            // --------------------------------
-                                                            bwFix.BaseStream.Position = optHdrOff + 0x20; // SectionAlignment
-                                                            bwFix.Write(secAlign);
-
-                                                            bwFix.BaseStream.Position = optHdrOff + 0x24; // FileAlignment
-                                                            bwFix.Write(fileAlign);
-
-                                                            // --------------------------------
-                                                            // Section table
-                                                            // --------------------------------
-                                                            ushort secCount =
-                                                                BitConverter.ToUInt16(virtualdump, fileHdrOff + 2);
-
-                                                            int secTableOff = optHdrOff + 0xE0;
-
-                                                            uint rawCursor = AlignUp(
-                                                                (uint)(secTableOff + secCount * 40),
-                                                                fileAlign);
-
-                                                            uint maxSectionEndVA = 0;
-
-                                                            for (int i = 0; i < secCount; i++)
-                                                            {
-                                                                int secHdr = secTableOff + (i * 40);
-
-                                                                uint vSize = BitConverter.ToUInt32(virtualdump, secHdr + 8);
-                                                                uint vAddr = BitConverter.ToUInt32(virtualdump, secHdr + 12);
-
-                                                                uint rawSizeAligned = AlignUp(vSize, fileAlign);
-
-                                                                // SizeOfRawData
-                                                                bwFix.BaseStream.Position = secHdr + 16;
-                                                                bwFix.Write(rawSizeAligned);
-
-                                                                // PointerToRawData
-                                                                bwFix.BaseStream.Position = secHdr + 20;
-                                                                bwFix.Write(rawCursor);
-
-                                                                rawCursor += rawSizeAligned;
-
-                                                                uint sectionEndVA =
-                                                                    vAddr + AlignUp(vSize, secAlign);
-
-                                                                if (sectionEndVA > maxSectionEndVA)
-                                                                    maxSectionEndVA = sectionEndVA;
-                                                            }
-
-                                                            // --------------------------------
-                                                            // SizeOfHeaders
-                                                            // --------------------------------
-                                                            uint headersSizeFixed = AlignUp(
-                                                                (uint)(secTableOff + secCount * 40),
-                                                                fileAlign);
-
-                                                            bwFix.BaseStream.Position = optHdrOff + 0x3C;
-                                                            bwFix.Write(headersSizeFixed);
-
-                                                            // --------------------------------
-                                                            // SizeOfImage
-                                                            // --------------------------------
-                                                            uint imageSizeFixed = AlignUp(maxSectionEndVA, secAlign);
-
-                                                            bwFix.BaseStream.Position = optHdrOff + 0x38;
-                                                            bwFix.Write(imageSizeFixed);
-                                                        }
-                                                        // =================== REAL FIX END =====================
 
                                                         int rightrawsize = 0;
                                                         for (int l = 0; l < nrofsection; l++)

@@ -1655,7 +1655,7 @@ namespace Mega_Dumper
         public void SetDirectoriesPath(ref DUMP_DIRECTORIES dpmdirs)
         {
             dpmdirs.dumps = Path.Combine("C:\\", "Dumps");
-            dpmdirs.nativedirname = dpmdirs.dumps; // dpmdirs.nativedirname = Path.Combine(dpmdirs.dumps, "Native");
+            dpmdirs.nativedirname = Path.Combine(dpmdirs.dumps, "Native");
             dpmdirs.sysdirname = Path.Combine(dpmdirs.dumps, "System");
             dpmdirs.unknowndirname = Path.Combine(dpmdirs.dumps, "UnknownName");
         }
@@ -2361,22 +2361,18 @@ namespace Mega_Dumper
                                     }
                                     else
                                     {
-                                        // NO NAME FOUND: Do NOT move to Unknown. 
-                                        // Keep the rawdump_ADDRESS name.
-                                        // But DO move to appropriate folder (Native/System) if applicable.
+                                        // Unknown files (e.g., rawdump/vdump) should be collected in the UnknownName folder.
+                                        string unknownDir = ddirs.unknowndirname;
+                                        try { Directory.CreateDirectory(unknownDir); } catch { }
 
-                                        if (finalDir != sourceDir) // If we decided it belongs in Native/System
-                                        {
-                                            string newFilename = Path.Combine(finalDir, fi.Name);
-                                            if (File.Exists(newFilename)) File.Delete(newFilename);
-                                            File.Move(fi.FullName, newFilename);
-                                        }
+                                        string newFilename = Path.Combine(unknownDir, fi.Name);
+                                        if (File.Exists(newFilename)) File.Delete(newFilename);
+                                        File.Move(fi.FullName, newFilename);
                                     }
                                 }
                                 catch
                                 {
-                                    // If anything fails, leave it alone. 
-                                    // DO NOT force move to UnknownName.
+                                    // If anything fails, leave the file in its current location.
                                 }
                             }
                         }
